@@ -1,0 +1,7 @@
+.snakemake/
+results/
+__pycache__/
+*.pyc
+*.pyo
+*.done
+.DS_Store

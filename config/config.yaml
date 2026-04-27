@@ -1,0 +1,41 @@
+inputs:
+  cellranger_multi_csv: config/cellranger_multi.example.csv
+  reference_hla_csv: ""
+
+results:
+  root: results
+
+cellranger:
+  executable: /path/to/cellranger
+  run_id: example_run
+  count_sample: example_sample
+  threads: 32
+  localmem_gb: 128
+
+souporcell:
+  container: /path/to/souporcell_release.sif
+  reference_fasta: /path/to/refdata-gex-GRCh38/fasta/genome.fa
+  donors: 4
+  threads: 16
+  # output_dir: results/souporcell/example_run
+  # common_variants: /path/to/common_snps_grch38.vcf.gz
+  # skip_remap: true
+  # max_loci: 1024
+
+arcashla:
+  # output_dir: results/arcasHLA/example_run
+  threads: 32
+  parallel_donors: 4
+  filter_threads: 8
+  extract_threads: 8
+  genotype_threads: 8
+  env_bin: /path/to/arcashla_env/bin
+  subset_bam: /path/to/subset-bam
+  tmp_dir: /tmp
+  temp_dir: /tmp/arcashla
+  genes: A,B,C,DRB1,DRB2
+  population: caucasian
+
+matching:
+  genes: A,B,C
+  two_field_resolution: true

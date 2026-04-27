@@ -1,0 +1,609 @@
+import os
+
+
+WORKFLOW_DIR = workflow.basedir
+REPO_ROOT = os.path.dirname(WORKFLOW_DIR)
+configfile: os.path.join(REPO_ROOT, "config", "config.yaml")
+
+shell.executable("/bin/bash")
+
+
+GENOTYPE_SUMMARY_SCRIPT = os.path.join(
+    WORKFLOW_DIR, "scripts", "genotype_json_to_csv.py"
+)
+ASSIGNMENT_SCRIPT = os.path.join(
+    WORKFLOW_DIR, "scripts", "build_donor_assignments.py"
+)
+PUBLISH_SCRIPT = os.path.join(
+    WORKFLOW_DIR, "scripts", "publish_demultiplexed.py"
+)
+
+
+def cfg(path):
+    value = config
+    for key in path.split("."):
+        if key not in value:
+            raise KeyError(f"Missing config entry: {path}")
+        value = value[key]
+    return value
+
+
+def cfg_or_default(path, default):
+    value = config
+    for key in path.split("."):
+        if not isinstance(value, dict) or key not in value:
+            return default
+        value = value[key]
+    return value
+
+
+def positive_int(value, label):
+    value = int(value)
+    if value < 1:
+        raise ValueError(f"{label} must be >= 1, got {value}")
+    return value
+
+
+def optional_positive_int(value, label):
+    if value in (None, ""):
+        return None
+    return positive_int(value, label)
+
+
+def parse_bool(value, label):
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+
+    raise ValueError(f"{label} must be a boolean, got {value!r}")
+
+
+def comma_separated(value):
+    if isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        items = [item.strip() for item in str(value).split(",") if item.strip()]
+    return ",".join(items)
+
+
+def donor_phase_threads(total_threads, parallel_jobs):
+    parallel_jobs = positive_int(parallel_jobs, "parallel_jobs")
+    return max(1, total_threads // parallel_jobs)
+
+
+def resolve_path(path):
+    path = str(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.join(REPO_ROOT, path)
+
+
+def resolve_optional_path(path):
+    if path in (None, ""):
+        return None
+    return resolve_path(path)
+
+
+RUN_ID = str(cfg("cellranger.run_id"))
+RESULTS_ROOT = resolve_path(cfg_or_default("results.root", "results"))
+WORKFLOW_STATE_DIR = os.path.join(RESULTS_ROOT, "snakemake_state")
+
+CELLRANGER = resolve_path(cfg("cellranger.executable"))
+CELLRANGER_MULTI_CSV = resolve_path(cfg("inputs.cellranger_multi_csv"))
+CELLRANGER_THREADS = positive_int(cfg("cellranger.threads"), "cellranger.threads")
+CELLRANGER_MEM_GB = positive_int(
+    cfg("cellranger.localmem_gb"), "cellranger.localmem_gb"
+)
+COUNT_SAMPLE = str(cfg("cellranger.count_sample"))
+CELLRANGER_ROOT = os.path.join(RESULTS_ROOT, "cellranger")
+CELLRANGER_RUN_DIR = os.path.join(CELLRANGER_ROOT, RUN_ID)
+CELLRANGER_DONE = os.path.join(
+    WORKFLOW_STATE_DIR, f"{RUN_ID}.cellranger_multi.done"
+)
+
+COUNT_DIR = os.path.join(
+    CELLRANGER_RUN_DIR,
+    "outs",
+    "per_sample_outs",
+    COUNT_SAMPLE,
+    "count",
+)
+COUNT_BAM = os.path.join(COUNT_DIR, "sample_alignments.bam")
+COUNT_BARCODES = os.path.join(
+    COUNT_DIR,
+    "sample_filtered_feature_bc_matrix",
+    "barcodes.tsv.gz",
+)
+
+SOUPORCELL_CONTAINER = resolve_path(cfg("souporcell.container"))
+SOUPORCELL_FASTA = resolve_path(cfg("souporcell.reference_fasta"))
+SOUPORCELL_THREADS = positive_int(cfg("souporcell.threads"), "souporcell.threads")
+SOUPORCELL_DONORS = positive_int(cfg("souporcell.donors"), "souporcell.donors")
+SOUPORCELL_OUTDIR = resolve_path(
+    cfg_or_default(
+        "souporcell.output_dir",
+        os.path.join(RESULTS_ROOT, "souporcell", RUN_ID),
+    )
+)
+SOUPORCELL_CLUSTERS = os.path.join(SOUPORCELL_OUTDIR, "clusters.tsv")
+SOUPORCELL_COMMON_VARIANTS = resolve_optional_path(
+    cfg_or_default("souporcell.common_variants", None)
+)
+SOUPORCELL_SKIP_REMAP = parse_bool(
+    cfg_or_default("souporcell.skip_remap", False),
+    "souporcell.skip_remap",
+)
+SOUPORCELL_MAX_LOCI = optional_positive_int(
+    cfg_or_default("souporcell.max_loci", None),
+    "souporcell.max_loci",
+)
+
+if SOUPORCELL_SKIP_REMAP and not SOUPORCELL_COMMON_VARIANTS:
+    raise ValueError(
+        "souporcell.skip_remap requires souporcell.common_variants in this workflow"
+    )
+
+if SOUPORCELL_THREADS > 24:
+    print(
+        f"[config warning] souporcell.threads={SOUPORCELL_THREADS}; "
+        "souporcell often becomes I/O-bound above ~16-20 threads on shared "
+        "filesystems because remap/retag creates many large temporary files."
+    )
+
+SOUPORCELL_OPTIONAL_ARGS = " ".join(
+    arg
+    for arg in [
+        (
+            f"--common_variants {SOUPORCELL_COMMON_VARIANTS}"
+            if SOUPORCELL_COMMON_VARIANTS
+            else ""
+        ),
+        "--skip_remap True" if SOUPORCELL_SKIP_REMAP else "",
+        f"--max_loci {SOUPORCELL_MAX_LOCI}" if SOUPORCELL_MAX_LOCI else "",
+    ]
+    if arg
+)
+
+ARCASHLA_ROOT = resolve_path(
+    cfg_or_default(
+        "arcashla.output_dir",
+        os.path.join(RESULTS_ROOT, "arcasHLA", RUN_ID),
+    )
+)
+ARCASHLA_TOTAL_THREADS = positive_int(cfg("arcashla.threads"), "arcashla.threads")
+ARCASHLA_PARALLEL_DONORS = positive_int(
+    cfg_or_default("arcashla.parallel_donors", SOUPORCELL_DONORS),
+    "arcashla.parallel_donors",
+)
+ARCASHLA_DONOR_THREADS = donor_phase_threads(
+    ARCASHLA_TOTAL_THREADS, ARCASHLA_PARALLEL_DONORS
+)
+ARCASHLA_FILTER_THREADS = positive_int(
+    cfg_or_default("arcashla.filter_threads", ARCASHLA_DONOR_THREADS),
+    "arcashla.filter_threads",
+)
+ARCASHLA_EXTRACT_THREADS = positive_int(
+    cfg_or_default("arcashla.extract_threads", ARCASHLA_DONOR_THREADS),
+    "arcashla.extract_threads",
+)
+ARCASHLA_GENOTYPE_THREADS = positive_int(
+    cfg_or_default("arcashla.genotype_threads", ARCASHLA_DONOR_THREADS),
+    "arcashla.genotype_threads",
+)
+ARCASHLA_ENV_BIN = resolve_path(cfg("arcashla.env_bin"))
+ARCASHLA_CMD = os.path.join(ARCASHLA_ENV_BIN, "arcasHLA")
+SAMTOOLS_CMD = os.path.join(ARCASHLA_ENV_BIN, "samtools")
+SUBSET_BAM = resolve_path(cfg("arcashla.subset_bam"))
+TMP_DIR = resolve_path(cfg("arcashla.tmp_dir"))
+ARCAS_TEMP_DIR = resolve_path(cfg("arcashla.temp_dir"))
+HLA_GENES = str(cfg("arcashla.genes"))
+HLA_POPULATION = str(cfg("arcashla.population"))
+
+REFERENCE_HLA_CSV = resolve_optional_path(
+    cfg_or_default("inputs.reference_hla_csv", None)
+)
+MATCHING_GENES = comma_separated(cfg_or_default("matching.genes", "A,B,C"))
+MATCHING_TWO_FIELD_FLAG = (
+    "--two-field-resolution"
+    if parse_bool(
+        cfg_or_default("matching.two_field_resolution", True),
+        "matching.two_field_resolution",
+    )
+    else "--no-two-field-resolution"
+)
+
+BARCODE_DIR = os.path.join(ARCASHLA_ROOT, "barcode_lists")
+FILTERED_BAM_DIR = os.path.join(ARCASHLA_ROOT, "donor_bam")
+EXTRACTED_FASTQ_DIR = os.path.join(ARCASHLA_ROOT, "extracted_fastq")
+GENOTYPE_DIR = os.path.join(ARCASHLA_ROOT, "genotype")
+
+REPORT_DIR = os.path.join(RESULTS_ROOT, "reports", RUN_ID)
+GENOTYPE_SUMMARY_CSV = os.path.join(
+    REPORT_DIR, "souporcell_cluster_hla_summary.csv"
+)
+ASSIGNMENT_CSV = os.path.join(REPORT_DIR, "cluster_to_donor_assignments.csv")
+MATCH_SCORE_CSV = os.path.join(REPORT_DIR, "donor_match_scores.csv")
+
+DEMULTIPLEX_DIR = os.path.join(RESULTS_ROOT, "demultiplexed", RUN_ID)
+DEMULTIPLEX_MANIFEST = os.path.join(DEMULTIPLEX_DIR, "manifest.tsv")
+
+
+def donor_sort_key(donor):
+    donor = str(donor)
+    if donor.isdigit():
+        return (0, int(donor))
+    return (1, donor)
+
+
+def get_count_bam(_wildcards=None):
+    checkpoints.cellranger_multi.get()
+
+    if not os.path.exists(COUNT_BAM):
+        raise FileNotFoundError(f"Cell Ranger BAM not found: {COUNT_BAM}")
+
+    return COUNT_BAM
+
+
+def get_count_barcodes(_wildcards=None):
+    checkpoints.cellranger_multi.get()
+
+    if not os.path.exists(COUNT_BARCODES):
+        raise FileNotFoundError(f"Cell Ranger barcodes file not found: {COUNT_BARCODES}")
+
+    return COUNT_BARCODES
+
+
+def get_clusters_file(_wildcards=None):
+    return checkpoints.run_souporcell.get().output.clusters
+
+
+def get_singlet_donors():
+    clusters_path = get_clusters_file()
+
+    if not os.path.exists(clusters_path):
+        raise FileNotFoundError(f"Souporcell clusters file not found: {clusters_path}")
+
+    donors = set()
+
+    with open(clusters_path) as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+
+            if len(fields) < 3 or fields[0] == "barcode":
+                continue
+
+            if fields[1] == "singlet":
+                donors.add(fields[2])
+
+    donors = sorted(donors, key=donor_sort_key)
+
+    if not donors:
+        raise ValueError(f"No singlet donors found in {clusters_path}")
+
+    return donors
+
+
+def genotype_json_inputs(_wildcards):
+    donors = get_singlet_donors()
+    return expand(
+        os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.json"),
+        donor=donors,
+    )
+
+
+def publish_inputs(_wildcards):
+    donors = get_singlet_donors()
+    inputs = [
+        ASSIGNMENT_CSV,
+        GENOTYPE_SUMMARY_CSV,
+    ]
+
+    patterns = [
+        os.path.join(BARCODE_DIR, "donor{donor}_barcodes.txt"),
+        os.path.join(FILTERED_BAM_DIR, "donor{donor}_filtered.bam"),
+        os.path.join(FILTERED_BAM_DIR, "donor{donor}_filtered.bam.bai"),
+        os.path.join(EXTRACTED_FASTQ_DIR, "donor{donor}_filtered.extracted.fq.gz"),
+        os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.alignment.p"),
+        os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genes.json"),
+        os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.json"),
+        os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.log"),
+    ]
+
+    for pattern in patterns:
+        inputs.extend(expand(pattern, donor=donors))
+
+    return inputs
+
+
+rule all:
+    input:
+        GENOTYPE_SUMMARY_CSV,
+        ASSIGNMENT_CSV,
+        MATCH_SCORE_CSV,
+        DEMULTIPLEX_MANIFEST
+
+
+checkpoint cellranger_multi:
+    input:
+        csv=CELLRANGER_MULTI_CSV
+    output:
+        done=CELLRANGER_DONE
+    threads:
+        CELLRANGER_THREADS
+    params:
+        cellranger=CELLRANGER,
+        run_id=RUN_ID,
+        run_root=CELLRANGER_ROOT,
+        localmem=CELLRANGER_MEM_GB,
+        done_dir=os.path.dirname(CELLRANGER_DONE),
+        count_bam=COUNT_BAM,
+        count_barcodes=COUNT_BARCODES
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{params.run_root}" "{params.done_dir}"
+        rm -f "{output.done}"
+
+        if [ -s "{params.count_bam}" ] && [ -s "{params.count_barcodes}" ]; then
+          touch "{output.done}"
+          printf '[%s] Reusing existing Cell Ranger outputs: %s\n' "$(date '+%F %T')" "{params.count_bam}"
+          exit 0
+        fi
+
+        cd "{params.run_root}"
+
+        "{params.cellranger}" multi \
+          --id="{params.run_id}" \
+          --csv="{input.csv}" \
+          --localcores="{threads}" \
+          --localmem="{params.localmem}"
+
+        test -s "{params.count_bam}"
+        test -s "{params.count_barcodes}"
+        touch "{output.done}"
+        printf '[%s] Finished cellranger_multi: run_id=%s threads=%s\n' "$(date '+%F %T')" "{params.run_id}" "{threads}"
+        """
+
+
+checkpoint run_souporcell:
+    input:
+        bam=get_count_bam,
+        barcodes=get_count_barcodes,
+        fasta=SOUPORCELL_FASTA,
+        container=SOUPORCELL_CONTAINER
+    output:
+        clusters=SOUPORCELL_CLUSTERS
+    threads:
+        SOUPORCELL_THREADS
+    params:
+        donors=SOUPORCELL_DONORS,
+        outdir=SOUPORCELL_OUTDIR,
+        outdir_parent=os.path.dirname(SOUPORCELL_OUTDIR),
+        optional_args=SOUPORCELL_OPTIONAL_ARGS
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{params.outdir_parent}"
+
+        if [ -s "{output.clusters}" ]; then
+          printf '[%s] Reusing existing souporcell output: %s\n' "$(date '+%F %T')" "{output.clusters}"
+          exit 0
+        fi
+
+        if [ -d "{params.outdir}" ]; then
+          backup_dir="{params.outdir}.partial.$(date '+%Y%m%d_%H%M%S')"
+          mv "{params.outdir}" "$backup_dir"
+          printf '[%s] Moved incomplete souporcell output to %s\n' "$(date '+%F %T')" "$backup_dir"
+        fi
+
+        apptainer exec "{input.container}" \
+          souporcell_pipeline.py \
+          -i "{input.bam}" \
+          -b "{input.barcodes}" \
+          -f "{input.fasta}" \
+          -t "{threads}" \
+          -o "{params.outdir}" \
+          -k "{params.donors}" {params.optional_args}
+
+        test -s "{output.clusters}"
+        printf '[%s] Finished run_souporcell: output=%s threads=%s\n' "$(date '+%F %T')" "{output.clusters}" "{threads}"
+        """
+
+
+rule make_donor_barcodes:
+    input:
+        clusters=get_clusters_file
+    output:
+        barcode_list=os.path.join(BARCODE_DIR, "donor{donor}_barcodes.txt")
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{BARCODE_DIR}"
+
+        awk -F '\t' '$2=="singlet" && $3=="{wildcards.donor}" {{print $1}}' \
+          "{input.clusters}" > "{output.barcode_list}"
+        printf '[%s] Finished make_donor_barcodes: donor=%s\n' "$(date '+%F %T')" "{wildcards.donor}"
+        """
+
+
+rule filter_donor_bam:
+    input:
+        bam=get_count_bam,
+        whitelist=os.path.join(BARCODE_DIR, "donor{donor}_barcodes.txt")
+    output:
+        bam=os.path.join(FILTERED_BAM_DIR, "donor{donor}_filtered.bam"),
+        bai=os.path.join(FILTERED_BAM_DIR, "donor{donor}_filtered.bam.bai")
+    threads:
+        ARCASHLA_FILTER_THREADS
+    params:
+        subset_bam=SUBSET_BAM,
+        samtools=SAMTOOLS_CMD,
+        tmpdir=TMP_DIR
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{FILTERED_BAM_DIR}"
+        export TMPDIR="{params.tmpdir}"
+
+        "{params.subset_bam}" \
+          --bam "{input.bam}" \
+          --cell-barcodes "{input.whitelist}" \
+          --out-bam "{output.bam}" \
+          --cores "{threads}"
+
+        "{params.samtools}" index -@ "{threads}" "{output.bam}"
+        printf '[%s] Finished filter_donor_bam: donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.donor}" "{threads}"
+        """
+
+
+rule extract_donor_fastq:
+    input:
+        bam=os.path.join(FILTERED_BAM_DIR, "donor{donor}_filtered.bam")
+    output:
+        fq=os.path.join(EXTRACTED_FASTQ_DIR, "donor{donor}_filtered.extracted.fq.gz"),
+        log=os.path.join(EXTRACTED_FASTQ_DIR, "donor{donor}_filtered.extract.log")
+    threads:
+        ARCASHLA_EXTRACT_THREADS
+    params:
+        arcas=ARCASHLA_CMD,
+        env_bin=ARCASHLA_ENV_BIN,
+        outdir=EXTRACTED_FASTQ_DIR,
+        temp=ARCAS_TEMP_DIR
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{params.outdir}" "{params.temp}"
+        export PATH="{params.env_bin}:$PATH"
+
+        "{params.arcas}" extract "{input.bam}" \
+          --single \
+          -o "{params.outdir}" \
+          -t "{threads}" \
+          -v \
+          --temp "{params.temp}"
+        printf '[%s] Finished extract_donor_fastq: donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.donor}" "{threads}"
+        """
+
+
+rule genotype_donor:
+    input:
+        fq=os.path.join(EXTRACTED_FASTQ_DIR, "donor{donor}_filtered.extracted.fq.gz")
+    output:
+        alignment=os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.alignment.p"),
+        genes=os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genes.json"),
+        genotype=os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.json"),
+        log=os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.log")
+    threads:
+        ARCASHLA_GENOTYPE_THREADS
+    params:
+        arcas=ARCASHLA_CMD,
+        env_bin=ARCASHLA_ENV_BIN,
+        genes=HLA_GENES,
+        population=HLA_POPULATION,
+        outdir=GENOTYPE_DIR,
+        temp=ARCAS_TEMP_DIR
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{params.outdir}" "{params.temp}"
+        export PATH="{params.env_bin}:$PATH"
+
+        "{params.arcas}" genotype "{input.fq}" \
+          --single \
+          -g "{params.genes}" \
+          -o "{params.outdir}" \
+          -t "{threads}" \
+          -p "{params.population}" \
+          -v \
+          --temp "{params.temp}"
+        printf '[%s] Finished genotype_donor: donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.donor}" "{threads}"
+        """
+
+
+rule summarize_genotypes:
+    input:
+        genotype_json_inputs
+    output:
+        csv=GENOTYPE_SUMMARY_CSV
+    params:
+        script=GENOTYPE_SUMMARY_SCRIPT,
+        input_dir=GENOTYPE_DIR,
+        report_dir=REPORT_DIR
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{params.report_dir}"
+
+        python3 "{params.script}" \
+          --input-dir "{params.input_dir}" \
+          --output-csv "{output.csv}"
+        printf '[%s] Finished summarize_genotypes: output=%s\n' "$(date '+%F %T')" "{output.csv}"
+        """
+
+
+rule build_donor_assignments:
+    input:
+        summary=GENOTYPE_SUMMARY_CSV
+    output:
+        assignment=ASSIGNMENT_CSV,
+        score=MATCH_SCORE_CSV
+    params:
+        script=ASSIGNMENT_SCRIPT,
+        reference=REFERENCE_HLA_CSV or "",
+        genes=MATCHING_GENES,
+        two_field_flag=MATCHING_TWO_FIELD_FLAG
+    shell:
+        r"""
+        set -euo pipefail
+
+        reference_arg=()
+        if [ -n "{params.reference}" ]; then
+          reference_arg+=(--reference-csv "{params.reference}")
+        fi
+
+        python3 "{params.script}" \
+          --genotype-summary "{input.summary}" \
+          --assignment-csv "{output.assignment}" \
+          --score-csv "{output.score}" \
+          --genes "{params.genes}" \
+          {params.two_field_flag} \
+          "${{reference_arg[@]}}"
+        printf '[%s] Finished build_donor_assignments: output=%s\n' "$(date '+%F %T')" "{output.assignment}"
+        """
+
+
+rule publish_demultiplexed:
+    input:
+        publish_inputs
+    output:
+        manifest=DEMULTIPLEX_MANIFEST
+    params:
+        script=PUBLISH_SCRIPT,
+        assignment_csv=ASSIGNMENT_CSV,
+        genotype_summary=GENOTYPE_SUMMARY_CSV,
+        barcode_dir=BARCODE_DIR,
+        bam_dir=FILTERED_BAM_DIR,
+        fastq_dir=EXTRACTED_FASTQ_DIR,
+        genotype_dir=GENOTYPE_DIR,
+        output_dir=DEMULTIPLEX_DIR
+    shell:
+        r"""
+        set -euo pipefail
+
+        python3 "{params.script}" \
+          --assignment-csv "{params.assignment_csv}" \
+          --genotype-summary "{params.genotype_summary}" \
+          --barcode-dir "{params.barcode_dir}" \
+          --bam-dir "{params.bam_dir}" \
+          --fastq-dir "{params.fastq_dir}" \
+          --genotype-dir "{params.genotype_dir}" \
+          --output-dir "{params.output_dir}" \
+          --manifest "{output.manifest}"
+        printf '[%s] Finished publish_demultiplexed: output=%s\n' "$(date '+%F %T')" "{output.manifest}"
+        """
