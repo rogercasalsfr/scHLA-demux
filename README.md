@@ -8,7 +8,7 @@
 4. An optional HLA-matching step to map souporcell clusters back to known donor HLA annotations
 5. A publishing step that collects donor-specific outputs into a ready-to-use demultiplexed folder
 
-The repository was built from the final working pipeline in `/home/rcasals/demultiplexing_pipeline`, but reorganized so the logic, configuration, and outputs are easier to reproduce and share.
+It is a cleaned-up version of a working pipeline, organised so that the logic, configuration and outputs are easy to reproduce and share.
 
 ## Workflow Summary
 
@@ -66,7 +66,7 @@ The helper scripts bundled in this repository only use the Python standard libra
 
 Edit `config/cellranger_multi.example.csv` to point to your FASTQ directories, then update `inputs.cellranger_multi_csv` in `config/config.yaml`.
 
-The workflow expects `cellranger multi`, because that matches your existing pipeline. Only the Cell Ranger gene-expression BAM and barcode matrix are used downstream by souporcell and arcasHLA. If your experiment also includes VDJ, you can extend the CSV accordingly.
+The workflow expects `cellranger multi`, the setup it was developed around. Only the Cell Ranger gene-expression BAM and barcode matrix are used downstream by souporcell and arcasHLA. If your experiment also includes VDJ, you can extend the CSV accordingly.
 
 ### 2. Optional Reference HLA Annotation CSV
 
@@ -145,3 +145,14 @@ Those donor-specific folders are the “demultiplexed data ready to go” layer 
 - HLA matching defaults to `A,B,C`, because those genes are usually the most useful for donor identification, but you can change that in `matching.genes`.
 - Matching is done at two-field HLA resolution by default so small formatting differences between reference annotations and arcasHLA output are less likely to block a valid match.
 - If you already have Cell Ranger outputs in the expected location, the workflow reuses them instead of rerunning `cellranger multi`.
+
+## Acknowledgements
+
+scHLA-demux orchestrates existing tools; please cite them if you use it:
+[Cell Ranger](https://www.10xgenomics.com/support/software/cell-ranger),
+[souporcell](https://github.com/wheaton5/souporcell) (Heaton et al., *Nature Methods* 2020) and
+[arcasHLA](https://github.com/RabadanLab/arcasHLA) (Orenbuch et al., *Bioinformatics* 2020).
+
+## License
+
+[MIT](LICENSE) © Roger Casals-Franch
