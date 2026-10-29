@@ -260,6 +260,18 @@ def main():
         for row in manifest_rows:
             writer.writerow(row)
 
+    # Patient folders from an earlier run whose label changed (e.g. donor0 -> a patient
+    # name after adding an HLA table). Only folders this script made are removed.
+    own_files = set(expected_artifacts("x", ".", ".", ".", ".")) | {"tcr_filtered_contig_annotations.csv"}
+    for folder in output_dir.iterdir():
+        if folder.is_dir() and not folder.is_symlink() and folder.name not in used_labels:
+            entries = list(folder.iterdir())
+            if entries and all(entry.name in own_files for entry in entries):
+                for entry in entries:
+                    entry.unlink()
+                folder.rmdir()
+                print(f"Removed outdated patient folder {folder}")
+
     label_by_cluster = {row["cluster_donor"]: row["donor"] for row in manifest_rows}
     write_cell_table(args.cell_table, args.pool, args.clusters, label_by_cluster)
 

@@ -164,7 +164,10 @@ def pool_checks(data, matching_genes):
         ))
         table_donors = sorted({row["reference_donor"] for row in data["scores"]})
         unused = [name for name in table_donors if name not in {donor["label"] for donor in matched}]
-        if unused:
+        if unused and len(table_donors) > data["n_expected"]:
+            checks.append((None, f"{len(unused)} patients of the HLA table are not in this pool "
+                                 "(fine for a table shared between pools)"))
+        elif unused:
             checks.append((False, f"in the HLA table but not found in the pool: {', '.join(unused)}"))
 
     return checks

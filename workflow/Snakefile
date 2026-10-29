@@ -358,11 +358,17 @@ def load_samples(path):
                 "number of donors is used)"
             )
 
-        if n_hla_donors and sample["n_donors"] and n_hla_donors != sample["n_donors"]:
+        if n_hla_donors and sample["n_donors"] and n_hla_donors < sample["n_donors"]:
             warnings.append(
                 f"{where}: n_donors is {sample['n_donors']} but the HLA table lists "
-                f"{n_hla_donors} donors; donors missing from the table keep their "
+                f"{n_hla_donors} patients; patients missing from the table keep their "
                 "souporcell cluster name"
+            )
+        elif n_hla_donors and sample["n_donors"] and n_hla_donors > sample["n_donors"]:
+            print(
+                f"[scHLA-demux] {where}: the HLA table lists {n_hla_donors} patients for "
+                f"{sample['n_donors']} in this pool (fine for a table shared between pools)",
+                file=sys.stderr,
             )
 
         samples[pool] = sample

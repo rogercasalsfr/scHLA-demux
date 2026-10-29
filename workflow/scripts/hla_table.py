@@ -20,13 +20,17 @@ layout, so a table produced by the workflow can be reused as an input.
 
 import csv
 import re
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree
 
 
 PREFERRED_GENE_ORDER = ["A", "B", "C", "DRB1", "DRB2", "DRB3", "DRB4", "DRB5",
                         "DQA1", "DQB1", "DPA1", "DPB1"]
 DONOR_COLUMN_NAMES = {"donor", "donor_id", "patient", "patient_id"}
 MISSING_VALUES = {"", "na", "nan", "none", "-", "?"}
+
+KNOWN_GENES = set(PREFERRED_GENE_ORDER) | {"E", "F", "G"}
 
 TWO_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)_(?P<copy>[12])$")
 ONE_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)_ALLELES$")
@@ -52,8 +56,55 @@ def detect_delimiter(header_line):
     return delimiter if counts[delimiter] else ","
 
 
+def read_xlsx_rows(path):
+    """Read the first sheet of an .xlsx file into (fieldnames, rows), standard library only."""
+    main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    rel_id = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+    with zipfile.ZipFile(path) as archive:
+        shared = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            for item in ElementTree.fromstring(archive.read("xl/sharedStrings.xml")).iter(f"{main}si"):
+                shared.append("".join(text.text or "" for text in item.iter(f"{main}t")))
+
+        first_sheet = ElementTree.fromstring(archive.read("xl/workbook.xml")).find(f"{main}sheets/{main}sheet")
+        relations = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        target = next(rel.get("Target") for rel in relations if rel.get("Id") == first_sheet.get(rel_id))
+        target = target.lstrip("/")
+        sheet = ElementTree.fromstring(archive.read(target if target.startswith("xl/") else f"xl/{target}"))
+
+        table = []
+        for row in sheet.iter(f"{main}row"):
+            values = {}
+            for cell in row.iter(f"{main}c"):
+                letters = re.match(r"[A-Z]+", cell.get("r", "")).group(0)
+                column = 0
+                for letter in letters:
+                    column = column * 26 + ord(letter) - 64
+                kind, value = cell.get("t"), cell.find(f"{main}v")
+                if kind == "s":
+                    text = shared[int(value.text)]
+                elif kind == "inlineStr":
+                    text = "".join(t.text or "" for t in cell.iter(f"{main}t"))
+                else:
+                    text = value.text if value is not None and value.text else ""
+                    text = re.sub(r"^(-?\d+)\.0$", r"\1", text)  # 1234567.0 -> 1234567
+                values[column - 1] = text.strip()
+            if any(values.values()):
+                table.append([values.get(index, "") for index in range(max(values) + 1)])
+
+    if not table:
+        raise HLATableError(f"{path}: the first sheet is empty")
+    fieldnames = [name.strip() for name in table[0]]
+    rows = [dict(zip(fieldnames, values + [""] * (len(fieldnames) - len(values)))) for values in table[1:]]
+    return fieldnames, rows
+
+
 def read_table_rows(path):
-    """Read a CSV/TSV file into (fieldnames, rows) with stripped values."""
+    """Read a CSV/TSV (or .xlsx) file into (fieldnames, rows) with stripped values."""
+    if str(path).lower().endswith(".xlsx"):
+        return read_xlsx_rows(path)
+
     with Path(path).open(newline="", encoding="utf-8-sig") as handle:
         header_line = handle.readline()
         handle.seek(0)
@@ -149,6 +200,10 @@ def read_hla_table(path):
         match = ONE_COLUMN.match(key)
         if match and key != "ALL_ALLELES":
             one_column[match.group("gene")] = name
+            continue
+        plain = key[4:] if key.startswith("HLA-") else key
+        if plain in KNOWN_GENES:  # column "A" holding "A*02:01, A*24:02"
+            one_column[plain] = name
             continue
         ignored_columns.append(name)
 

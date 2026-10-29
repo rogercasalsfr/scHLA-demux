@@ -79,7 +79,7 @@ Results are written to `results/<pool>/`. Open `results/qc_report.html` first (s
 | `gex_fastqs` | yes | Folder with the gene-expression FASTQs (`NAME_S1_L001_R1_001.fastq.gz`, ...) |
 | `tcr_fastqs` | no | Folder with the TCR (V(D)J-T) FASTQs. Leave empty for a GEX-only pool |
 | `n_donors` | yes* | Number of patients mixed in the pool. *Can be left empty when `hla_csv` is given: the number of rows in the HLA table is used |
-| `hla_csv` | no | The HLA table of the patients in this pool. Leave empty to skip matching |
+| `hla_csv` | no | The HLA table (`.csv`, `.tsv` or `.xlsx`) of the patients in this pool, or a table shared by several pools. Leave empty to skip matching |
 | `gex_fastq_id`, `tcr_fastq_id` | no | Only needed when one folder holds FASTQs of several samples: the file name part before `_S1_...` |
 | `expect_cells` | no | Expected number of cells for Cell Ranger (default: let Cell Ranger estimate) |
 | `multi_csv` | no | Advanced: your own Cell Ranger multi CSV (e.g. for CITE-seq). The FASTQ columns are then ignored |
@@ -113,7 +113,19 @@ Tip for Excel users: always write the gene prefix (`A*02:01`, not `02:01`). Othe
 
 The pipeline writes the HLA alleles it finds in the same layout (`results/<pool>/reports/souporcell_cluster_hla_summary.csv`). You can open both tables side by side, or copy the output, rename the `donor` values and reuse it as an input.
 
-The old one-column-per-gene layout (`A_alleles = "A*02:01 | A*24:02"`) is still accepted.
+**Other layouts that also work:**
+
+- One column per gene, named after the gene, with both alleles in one cell. A single allele means homozygous:
+
+  ```text
+  patient      A                   B                   C         DRB1
+  Patient_07   A*02:01, A*24:02    B*07:02, B*44:03    C*05:01   DRB1*04:01, DRB1*13:01
+  ```
+
+- `A_alleles` columns with alleles separated by `|`, the old layout.
+- **File types**: `.csv`, `.tsv`, or an Excel `.xlsx` file. For Excel, the first sheet is read.
+
+**One table for several pools**: you can point every pool to the same table. Each pool's clusters are matched against all patients in it, and the patients that belong to other pools are simply not used. In that case fill in `n_donors`, because otherwise it would be taken from the table's row count.
 
 ## Outputs
 
