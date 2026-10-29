@@ -1,41 +1,63 @@
-inputs:
-  cellranger_multi_csv: config/cellranger_multi.example.csv
-  reference_hla_csv: ""
+# scHLA-demux settings.
+#
+# What to run (which FASTQs, how many donors, which HLA table) goes in the
+# sample sheet below. This file holds the tool paths and settings, which you
+# normally set once per cluster.
+#
+# Relative paths are relative to the scHLA-demux folder.
 
-results:
-  root: results
+# One row per 10x pool. See config/samples.csv and the README.
+samples: config/samples.csv
+
+# Everything is written to <results_dir>/<pool>/...
+results_dir: results
+
 
 cellranger:
-  executable: /path/to/cellranger
-  run_id: example_run
-  count_sample: example_sample
-  threads: 32
-  localmem_gb: 128
+  executable: /home/rcasals/cellranger/cellranger-9.0.1/cellranger
+  gex_reference: /home/rcasals/cellranger/refdata-gex-GRCh38-2024-A
+  # Only needed when a pool has TCR FASTQs.
+  vdj_reference: /home/rcasals/cellranger/refdata-cellranger-vdj-GRCh38-alts-ensembl-7.1.0
+  # Leave empty to let Cell Ranger estimate it. Can be set per pool in samples.csv.
+  expect_cells: ""
+  threads: 42
+  localmem_gb: 200
+
 
 souporcell:
-  container: /path/to/souporcell_release.sif
-  reference_fasta: /path/to/refdata-gex-GRCh38/fasta/genome.fa
-  donors: 4
+  container: /home/rcasals/souporcell/souporcell_release.sif
+  # Command used to run the container (apptainer or singularity).
+  apptainer: apptainer
+  # Leave empty to use <gex_reference>/fasta/genome.fa.
+  reference_fasta: ""
+  # Above ~16-20 threads souporcell often gets slower on shared filesystems.
   threads: 16
-  # output_dir: results/souporcell/example_run
+  # Optional speed-ups:
   # common_variants: /path/to/common_snps_grch38.vcf.gz
-  # skip_remap: true
+  # skip_remap: true        # only together with common_variants
   # max_loci: 1024
 
+
 arcashla:
-  # output_dir: results/arcasHLA/example_run
-  threads: 32
-  parallel_donors: 4
-  filter_threads: 8
-  extract_threads: 8
-  genotype_threads: 8
-  env_bin: /path/to/arcashla_env/bin
-  subset_bam: /path/to/subset-bam
-  tmp_dir: /tmp
-  temp_dir: /tmp/arcashla
+  # bin/ folder of the conda env that has both arcasHLA and samtools.
+  env_bin: /home/rcasals/anaconda3/envs/arcashla_clone/bin
+  subset_bam: /home/rcasals/software_roger/subset-bam
+  tmp_dir: /home/rcasals/tmp
+  temp_dir: /home/rcasals/tmp_arcashla
+  # HLA genes to genotype, and the arcasHLA population prior.
   genes: A,B,C,DRB1,DRB2
   population: caucasian
+  # Thread budget for the per-donor phase, shared by parallel_donors donors.
+  threads: 42
+  parallel_donors: 4
+  # Optional per-step overrides (default: threads / parallel_donors).
+  # filter_threads: 10
+  # extract_threads: 10
+  # genotype_threads: 10
+
 
 matching:
+  # Genes compared between the arcasHLA calls and your donor HLA table.
   genes: A,B,C
+  # Compare alleles at two-field resolution (A*02:01:01 counts as A*02:01).
   two_field_resolution: true

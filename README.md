@@ -1,147 +1,259 @@
 # scHLA-demux
 
-`scHLA-demux` is a Snakemake workflow for donor demultiplexing of 10x single-cell data starting from raw FASTQ files. The workflow runs:
+`scHLA-demux` takes the FASTQ files of a 10x single-cell pool that mixes cells from several patients, splits the cells by patient, and tells you which patient each group of cells comes from, using their HLA type.
 
-1. `cellranger multi` to generate the filtered barcode matrix and sample BAM
-2. `souporcell` to infer donor clusters from the gene-expression BAM
-3. `arcasHLA` on each souporcell singlet cluster to genotype HLA alleles
-4. An optional HLA-matching step to map souporcell clusters back to known donor HLA annotations
-5. A publishing step that collects donor-specific outputs into a ready-to-use demultiplexed folder
+You give it:
 
-The repository was built from the final working pipeline in `/home/rcasals/demultiplexing_pipeline`, but reorganized so the logic, configuration, and outputs are easier to reproduce and share.
+- the FASTQ folders of each pool (gene expression, and optionally TCR),
+- how many patients are in each pool,
+- optionally, a table with each patient's known HLA alleles.
 
-## Workflow Summary
+You get, for each pool:
 
-Inputs:
+- one folder per patient with that patient's cell barcodes, BAM, HLA calls and (if you sequenced TCR) TCR contigs,
+- a table saying which patient every cell barcode belongs to, ready to add to Seurat or Scanpy,
+- the HLA alleles found for each patient, in the same layout as the table you gave.
 
-- A Cell Ranger multi CSV that points to your 10x FASTQ directories
-- A gene-expression reference FASTA for souporcell
-- A souporcell container image
-- An arcasHLA environment with `arcasHLA` and `samtools`
-- The `subset-bam` executable
-- Optionally, a donor HLA annotation CSV to label clusters with real donor IDs
-
-Outputs:
-
-- Cell Ranger run directory under `results/cellranger/<run_id>/`
-- Souporcell clusters under `results/souporcell/<run_id>/clusters.tsv`
-- Donor barcode lists, donor BAMs, extracted FASTQs, and genotype JSONs under `results/arcasHLA/<run_id>/`
-- HLA summary tables under `results/reports/<run_id>/`
-- Donor-labeled demultiplexed outputs under `results/demultiplexed/<run_id>/`
-
-If you provide a reference HLA annotation table, the workflow matches each souporcell cluster to the best donor profile using the configured HLA genes. If you leave that table blank, the workflow still runs and publishes outputs using the souporcell cluster names such as `donor0`, `donor1`, and so on.
-
-## Repository Layout
+## How it works
 
 ```text
-scHLA-demux/
-├── config/
-│   ├── config.yaml
-│   ├── cellranger_multi.example.csv
-│   └── reference_hla.example.csv
-├── workflow/
-│   ├── Snakefile
-│   └── scripts/
-│       ├── build_donor_assignments.py
-│       ├── genotype_json_to_csv.py
-│       └── publish_demultiplexed.py
-└── README.md
+FASTQs (GEX [+ TCR])
+   │
+   ▼  cellranger multi         count matrix, BAM, TCR contigs
+   ▼  souporcell               groups cells into N genotype clusters (N = patients in the pool)
+   ▼  arcasHLA                 HLA alleles of each cluster
+   ▼  HLA matching             cluster ↔ patient, using your HLA table
+   ▼  publish                  one folder per patient + cell_to_donor.csv
 ```
 
-## Requirements
+Souporcell finds the patients from the SNPs in the RNA reads, but it only calls them `0, 1, 2, ...`. arcasHLA then genotypes the HLA genes of each cluster, and the matching step compares these alleles with your HLA table to put the real patient name on each cluster. Without an HLA table, everything still runs, and the patients keep the names `donor0`, `donor1`, ...
 
-The workflow expects these tools to be available on the machine where you run Snakemake:
+## Quick start
 
-- `snakemake`
-- `cellranger`
-- `apptainer` or `singularity` with a working souporcell container image
-- `subset-bam`
-- An arcasHLA environment whose `bin/` directory contains both `arcasHLA` and `samtools`
+All commands are run from the `scHLA-demux` folder.
 
-The helper scripts bundled in this repository only use the Python standard library.
+### 1. List your pools in `config/samples.csv`
 
-## Input Files
-
-### 1. Cell Ranger Multi CSV
-
-Edit `config/cellranger_multi.example.csv` to point to your FASTQ directories, then update `inputs.cellranger_multi_csv` in `config/config.yaml`.
-
-The workflow expects `cellranger multi`, because that matches your existing pipeline. Only the Cell Ranger gene-expression BAM and barcode matrix are used downstream by souporcell and arcasHLA. If your experiment also includes VDJ, you can extend the CSV accordingly.
-
-### 2. Optional Reference HLA Annotation CSV
-
-If you want to map souporcell clusters back to known donor identities, create a CSV like `config/reference_hla.example.csv` and set `inputs.reference_hla_csv` in `config/config.yaml`.
-
-Expected format:
-
-- One row per donor
-- A `donor` column
-- One or more `*_alleles` columns such as `A_alleles`, `B_alleles`, `C_alleles`
-- Multiple alleles for one gene separated by `|`
-
-Example:
+One row per 10x pool (one Cell Ranger run):
 
 ```csv
-donor,A_alleles,B_alleles,C_alleles
-Donor_01,A*02:01 | A*24:02,B*07:02 | B*44:03,C*05:01 | C*07:02
-Donor_02,A*01:01 | A*03:01,B*08:01 | B*35:01,C*04:01 | C*07:01
+pool,gex_fastqs,tcr_fastqs,n_donors,hla_csv
+Pool1,/data/run1/L1216,/data/run1/L1213,4,config/hla_pool1.csv
+Pool2,/data/run2/L1300,,3,
 ```
+
+Here Pool1 has GEX and TCR, 4 patients and an HLA table. Pool2 is GEX only, with 3 patients and no HLA table. See [The sample sheet](#the-sample-sheet) for every column.
+
+### 2. (Optional) Write an HLA table for each pool
+
+```csv
+donor,A_1,A_2,B_1,B_2,C_1,C_2
+Patient_01,A*02:01,A*24:02,B*07:02,B*44:03,C*05:01,C*07:02
+Patient_02,A*01:01,A*03:01,B*08:01,B*35:01,C*04:01,C*07:01
+Patient_03,A*11:01,A*11:01,B*15:01,B*40:01,,
+```
+
+See [The donor HLA table](#the-donor-hla-table). `config/hla_example.csv` is a template.
+
+### 3. Check, then run
+
+```bash
+# check every input and show what will run (small job, takes seconds)
+sbatch --cpus-per-task=1 --mem=4G --partition=normal1 run_slurm.sh --dry-run
+
+# run everything
+sbatch run_slurm.sh
+```
+
+Logs are written to `logs/scHLA-demux_<jobid>.out` and `.err`. Before anything starts, the pipeline checks the sample sheet, the FASTQ folders, the HLA tables and the tool paths. Any problems are listed together in the `.err` log, so you can fix them all at once.
+
+Results are written to `results/<pool>/`. Open `results/qc_report.html` first (see [Checking that everything ran well](#checking-that-everything-ran-well)). Then go to `results/<pool>/demultiplexed/`.
+
+## The sample sheet
+
+`config/samples.csv` has one row per pool. Comma-, semicolon- or tab-separated files all work, so a sheet saved from Excel is fine.
+
+| Column | Required | What to put |
+|---|---|---|
+| `pool` | yes | A short name for the pool, used for the results folder. Letters, digits, `_`, `-`, `.` |
+| `gex_fastqs` | yes | Folder with the gene-expression FASTQs (`NAME_S1_L001_R1_001.fastq.gz`, ...) |
+| `tcr_fastqs` | no | Folder with the TCR (V(D)J-T) FASTQs. Leave empty for a GEX-only pool |
+| `n_donors` | yes* | Number of patients mixed in the pool. *Can be left empty when `hla_csv` is given: the number of rows in the HLA table is used |
+| `hla_csv` | no | The HLA table of the patients in this pool. Leave empty to skip matching |
+| `gex_fastq_id`, `tcr_fastq_id` | no | Only needed when one folder holds FASTQs of several samples: the file name part before `_S1_...` |
+| `expect_cells` | no | Expected number of cells for Cell Ranger (default: let Cell Ranger estimate) |
+| `multi_csv` | no | Advanced: your own Cell Ranger multi CSV (e.g. for CITE-seq). The FASTQ columns are then ignored |
+
+Notes:
+
+- The pipeline writes the Cell Ranger multi CSV for you (`results/<pool>/cellranger_multi.csv`) and finds the FASTQ sample name from the file names.
+- `n_donors` is the number souporcell looks for. Put the real number of patients in the pool, even if some are missing from your HLA table.
+- Several pools in one sheet run in the same SLURM job, one after the other or side by side, as the cores allow.
+
+## The donor HLA table
+
+One row per patient, two columns per HLA gene (one allele in each):
+
+```csv
+donor,A_1,A_2,B_1,B_2,C_1,C_2
+Patient_01,A*02:01,A*24:02,B*07:02,B*44:03,C*05:01,C*07:02
+Patient_03,A*11:01,A*11:01,B*15:01,B*40:01,,
+```
+
+Rules:
+
+- **`donor` column**: the patient name. This becomes the folder name and the label of the cells. `patient` also works as the column name.
+- **Gene columns**: `<gene>_1` and `<gene>_2`, e.g. `A_1, A_2, B_1, B_2, C_1, C_2`. Matching uses A, B and C by default. You can add other genes such as `DRB1_1, DRB1_2`, and use them by adding them to `matching.genes` in `config/config.yaml`.
+- **Homozygous**: write the same allele in both columns (`A*11:01, A*11:01`).
+- **Unknown**: leave the cell empty (or write `NA`). That allele is just not compared.
+- **Allele spelling**: `A*02:01`, `A*02:01:01`, `HLA-A*02:01` and `02:01` are all accepted. Matching is done at two-field resolution (`A*02:01`), so it doesn't matter how many fields you give.
+- **Other columns** (e.g. `notes`) are allowed and ignored. The pipeline prints a warning so you can spot a typo such as `A1`.
+
+Tip for Excel users: always write the gene prefix (`A*02:01`, not `02:01`). Otherwise Excel may turn the value into a time.
+
+The pipeline writes the HLA alleles it finds in the same layout (`results/<pool>/reports/souporcell_cluster_hla_summary.csv`). You can open both tables side by side, or copy the output, rename the `donor` values and reuse it as an input.
+
+The old one-column-per-gene layout (`A_alleles = "A*02:01 | A*24:02"`) is still accepted.
+
+## Outputs
+
+```text
+results/
+├── qc_report.html                     plots and checks for every pool: open this first
+├── all_pools_donors.csv               one row per patient per pool: status, cell counts, HLA
+├── all_pools_cell_to_donor.csv        every cell barcode of every pool, with its patient
+└── <pool>/
+    ├── demultiplexed/
+    │   ├── cell_to_donor.csv          pool, barcode, donor, souporcell_status, souporcell_cluster
+    │   ├── manifest.tsv               one row per patient, with paths to every file
+    │   └── <patient>/
+    │       ├── barcodes.txt                           this patient's cell barcodes
+    │       ├── sample_alignments.bam(.bai)            this patient's reads
+    │       ├── tcr_filtered_contig_annotations.csv    this patient's TCR contigs (TCR pools only)
+    │       ├── hla.genotype.json                      arcasHLA call
+    │       └── reads.extracted.fq.gz, hla.*           arcasHLA intermediate files
+    ├── reports/
+    │   ├── souporcell_cluster_hla_summary.csv   HLA alleles found per cluster (same layout as the input table)
+    │   ├── cluster_to_donor_assignments.csv     which patient each cluster was matched to, and why
+    │   └── donor_match_scores.csv               every cluster against every patient
+    ├── cellranger_multi.csv                     the Cell Ranger config that was used
+    ├── cellranger/                              full Cell Ranger output (web_summary.html, matrices, VDJ)
+    ├── souporcell/                              full souporcell output
+    └── arcasHLA/                                per-cluster intermediate files
+```
+
+In `cell_to_donor.csv`, the `donor` column holds the patient name for singlets, and `doublet` or `unassigned` for cells souporcell could not place.
+
+### Checking that everything ran well
+
+`results/qc_report.html` is a single file that opens in any browser, with nothing to install, and can be emailed. It starts with one line per pool. Each pool then gets:
+
+- **Checks**, marked ✓ OK or ⚠ Check:
+  - souporcell found the expected number of patients;
+  - every patient has at least 200 cells;
+  - doublets ≤ 30% and unassigned cells ≤ 10%;
+  - at least 1,000 HLA reads per gene behind each HLA call;
+  - every cluster matched a patient of the HLA table, and every patient of the table was found.
+- **Cell Ranger numbers**: cells, genes and reads per cell, mapping, and TCR pairing.
+- **Cells per patient**: singlets for each patient, plus doublets and unassigned cells.
+- **HLA match grid**: for each cluster and each patient of the table, how many alleles they share (`5/5`). ✓ marks the name each cluster was given. A good run has one dark cell per row and per column.
+- **TCR per patient**: the share of each patient's cells with a TCR contig (TCR pools only).
+- **HLA calls**: the alleles found for each patient and the number of reads behind each gene.
+
+⚠ Check means a result is unusual and worth a look, not that the run failed. Hover over a bar or grid cell to see its exact numbers. The thresholds are at the top of `workflow/scripts/qc_report.py`.
+
+### `match_status`: how sure is the patient label?
+
+| Status | Meaning | Folder name |
+|---|---|---|
+| `matched` | One patient clearly shares the most HLA alleles with this cluster | the patient name |
+| `ambiguous` | Two or more patients tie for the best match (they share alleles) | `donorN` |
+| `unmatched` | No allele shared with any patient in the table (e.g. patient missing from the table) | `donorN` |
+| `conflicting_match` | Two clusters both matched best to the same patient | `donorN` |
+| `no_reference_annotation` | No HLA table was given for this pool | `donorN` |
+
+For anything other than `matched`, open `donor_match_scores.csv` to see how each cluster compares with each patient.
+
+### Adding the patient labels to Seurat or Scanpy
+
+The barcodes are the same as in Cell Ranger's filtered matrix.
+
+```r
+cells <- read.csv("results/Pool1/demultiplexed/cell_to_donor.csv")
+obj$donor <- cells$donor[match(colnames(obj), cells$barcode)]
+```
+
+```python
+import pandas as pd
+cells = pd.read_csv("results/Pool1/demultiplexed/cell_to_donor.csv").set_index("barcode")
+adata.obs["donor"] = cells["donor"].reindex(adata.obs_names).values
+```
+
+## Running, re-running and resuming
+
+- **Resuming**: if the job stops (time limit, node failure), submit `sbatch run_slurm.sh` again. Finished steps are not redone.
+- **Adding a pool**: add a row to `samples.csv` and submit again. Only the new pool runs.
+- **Changing the HLA table**: edit it and submit again. Only the matching and publishing steps rerun.
+- **Changing `n_donors`**: delete `results/<pool>/souporcell` and everything after it (`arcasHLA`, `reports`, `demultiplexed`), then submit again.
+- **Re-running Cell Ranger**: an existing Cell Ranger output in `results/<pool>/cellranger` is always reused. Delete that folder to run it again (e.g. after changing the FASTQs).
+- **Other config file**: `sbatch run_slurm.sh --configfile config/other.yaml`. Any extra arguments are passed to Snakemake.
 
 ## Configuration
 
-Main settings live in `config/config.yaml`.
+Tool paths and settings live in `config/config.yaml`. You normally set them once per cluster:
 
-Important fields:
+| Setting | What it is |
+|---|---|
+| `samples` | Path of the sample sheet |
+| `results_dir` | Where results are written |
+| `cellranger.executable`, `gex_reference`, `vdj_reference` | Cell Ranger and its references (`vdj_reference` is only needed for TCR pools) |
+| `cellranger.threads`, `localmem_gb` | Resources for Cell Ranger. Keep them within the SLURM request in `run_slurm.sh` |
+| `souporcell.container` | Souporcell Apptainer/Singularity image |
+| `souporcell.reference_fasta` | Genome FASTA. Empty = `<gex_reference>/fasta/genome.fa` |
+| `arcashla.env_bin` | `bin/` folder of the conda env with `arcasHLA` and `samtools` |
+| `arcashla.subset_bam` | 10x `subset-bam` executable |
+| `arcashla.genes`, `population` | HLA genes to genotype and the arcasHLA population prior |
+| `matching.genes` | HLA genes compared with your table (default `A,B,C`) |
+| `matching.two_field_resolution` | Compare alleles at two-field resolution (default `true`) |
 
-- `cellranger.run_id`: folder name created by Cell Ranger
-- `cellranger.count_sample`: sample folder name under `outs/per_sample_outs/`
-- `souporcell.donors`: expected donor count for souporcell
-- `arcashla.env_bin`: `bin/` directory of the environment that contains `arcasHLA` and `samtools`
-- `arcashla.subset_bam`: path to `subset-bam`
-- `matching.genes`: HLA genes used to compare inferred cluster genotypes against your reference donor table
+The SLURM request (partition, CPUs, memory, time) is set at the top of `run_slurm.sh`. The Snakemake used is set there too, or with `SNAKEMAKE=/path/to/snakemake sbatch run_slurm.sh`.
 
-The default output structure is generated automatically under `results/`. You can keep the defaults, or override the souporcell and arcasHLA output directories in the YAML if you prefer a different layout.
+## Troubleshooting
 
-## Run
+- **"Please fix these problems before running scHLA-demux"**: the list under it says which line of which file is wrong.
+- **"holds FASTQs of several samples"**: add a `gex_fastq_id` (or `tcr_fastq_id`) column with the sample name to use.
+- **Cell Ranger says the pipestance is locked**: a previous run was killed. Delete `results/<pool>/cellranger/_lock` and submit again.
+- **Most clusters are `unmatched`**: check that the HLA table belongs to this pool. Then compare `souporcell_cluster_hla_summary.csv` with your table. Low-coverage clusters can have incomplete HLA calls.
+- **`ambiguous`**: the tied patients share alleles at the compared genes. Adding more genes (e.g. `DRB1`) to the table and to `matching.genes` can separate them.
 
-From the repository root:
+## Requirements
 
-```bash
-snakemake -s workflow/Snakefile --cores 42 --rerun-incomplete --printshellcmds
+- `snakemake` (7 or newer)
+- `cellranger` (multi; tested with 9.0.1)
+- `apptainer` or `singularity`, with the souporcell image
+- `subset-bam` (10x Genomics)
+- a conda env with `arcasHLA` and `samtools`
+
+The helper scripts only use the Python standard library.
+
+## Repository layout
+
+```text
+scHLA-demux/
+├── run_slurm.sh                  SLURM launcher
+├── config/
+│   ├── config.yaml               tool paths and settings
+│   ├── samples.csv               the pools to run
+│   ├── hla_example.csv           HLA table template
+│   └── cellranger_multi.example.csv
+└── workflow/
+    ├── Snakefile
+    └── scripts/
+        ├── hla_table.py                reads/validates/writes HLA tables
+        ├── make_multi_csv.py           writes the Cell Ranger multi CSV
+        ├── genotype_json_to_csv.py     arcasHLA calls -> HLA table
+        ├── build_donor_assignments.py  cluster <-> patient matching
+        ├── publish_demultiplexed.py    per-patient folders, cell table, TCR split
+        ├── summarize_pools.py          all-pools summary tables
+        └── qc_report.py                QC report (HTML with inline SVG charts)
 ```
-
-If you prefer to point to another config file:
-
-```bash
-snakemake -s workflow/Snakefile --configfile path/to/config.yaml --cores 42
-```
-
-## Final Outputs
-
-The main user-facing outputs are:
-
-- `results/reports/<run_id>/souporcell_cluster_hla_summary.csv`
-  - One row per souporcell singlet cluster with the inferred HLA calls from arcasHLA
-- `results/reports/<run_id>/cluster_to_donor_assignments.csv`
-  - Cluster-to-donor assignment table
-  - `match_status` tells you whether a cluster was confidently matched, ambiguous, unmatched, or published without a reference annotation
-- `results/reports/<run_id>/donor_match_scores.csv`
-  - Pairwise HLA match scores between each souporcell cluster and each reference donor
-- `results/demultiplexed/<run_id>/<published_label>/`
-  - `barcodes.txt`
-  - `sample_alignments.bam`
-  - `sample_alignments.bam.bai`
-  - `reads.extracted.fq.gz`
-  - `hla.genotype.json`
-  - `hla.genes.json`
-  - `hla.genotype.log`
-  - `hla.alignment.p`
-
-Those donor-specific folders are the “demultiplexed data ready to go” layer of the workflow. If a reference donor table is provided and the match is unique, the folder name is the donor ID from that table. Otherwise the workflow falls back to the souporcell cluster label.
-
-## Notes
-
-- The workflow reads only souporcell singlets when building donor-specific outputs.
-- HLA matching defaults to `A,B,C`, because those genes are usually the most useful for donor identification, but you can change that in `matching.genes`.
-- Matching is done at two-field HLA resolution by default so small formatting differences between reference annotations and arcasHLA output are less likely to block a valid match.
-- If you already have Cell Ranger outputs in the expected location, the workflow reuses them instead of rerunning `cellranger multi`.

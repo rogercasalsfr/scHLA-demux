@@ -1,22 +1,30 @@
+import glob
 import os
+import re
+import shlex
+import sys
+
+from snakemake.exceptions import WorkflowError
 
 
 WORKFLOW_DIR = workflow.basedir
 REPO_ROOT = os.path.dirname(WORKFLOW_DIR)
+SCRIPTS_DIR = os.path.join(WORKFLOW_DIR, "scripts")
 configfile: os.path.join(REPO_ROOT, "config", "config.yaml")
 
 shell.executable("/bin/bash")
 
+sys.path.insert(0, SCRIPTS_DIR)
+import hla_table  # noqa: E402
 
-GENOTYPE_SUMMARY_SCRIPT = os.path.join(
-    WORKFLOW_DIR, "scripts", "genotype_json_to_csv.py"
-)
-ASSIGNMENT_SCRIPT = os.path.join(
-    WORKFLOW_DIR, "scripts", "build_donor_assignments.py"
-)
-PUBLISH_SCRIPT = os.path.join(
-    WORKFLOW_DIR, "scripts", "publish_demultiplexed.py"
-)
+
+PYTHON = sys.executable
+MULTI_CSV_SCRIPT = os.path.join(SCRIPTS_DIR, "make_multi_csv.py")
+GENOTYPE_SUMMARY_SCRIPT = os.path.join(SCRIPTS_DIR, "genotype_json_to_csv.py")
+ASSIGNMENT_SCRIPT = os.path.join(SCRIPTS_DIR, "build_donor_assignments.py")
+PUBLISH_SCRIPT = os.path.join(SCRIPTS_DIR, "publish_demultiplexed.py")
+POOLS_SUMMARY_SCRIPT = os.path.join(SCRIPTS_DIR, "summarize_pools.py")
+QC_REPORT_SCRIPT = os.path.join(SCRIPTS_DIR, "qc_report.py")
 
 
 def cfg(path):
@@ -78,7 +86,7 @@ def donor_phase_threads(total_threads, parallel_jobs):
 
 
 def resolve_path(path):
-    path = str(path)
+    path = os.path.expanduser(str(path))
     if os.path.isabs(path):
         return path
     return os.path.join(REPO_ROOT, path)
@@ -90,48 +98,30 @@ def resolve_optional_path(path):
     return resolve_path(path)
 
 
-RUN_ID = str(cfg("cellranger.run_id"))
-RESULTS_ROOT = resolve_path(cfg_or_default("results.root", "results"))
-WORKFLOW_STATE_DIR = os.path.join(RESULTS_ROOT, "snakemake_state")
+# --------------------------------------------------------------------------
+# Settings from config/config.yaml
+# --------------------------------------------------------------------------
+
+RESULTS_ROOT = resolve_path(cfg_or_default("results_dir", "results"))
+SAMPLES_CSV = resolve_path(cfg("samples"))
 
 CELLRANGER = resolve_path(cfg("cellranger.executable"))
-CELLRANGER_MULTI_CSV = resolve_path(cfg("inputs.cellranger_multi_csv"))
+GEX_REFERENCE = resolve_path(cfg("cellranger.gex_reference"))
+VDJ_REFERENCE = resolve_optional_path(cfg_or_default("cellranger.vdj_reference", None))
+DEFAULT_EXPECT_CELLS = optional_positive_int(
+    cfg_or_default("cellranger.expect_cells", None), "cellranger.expect_cells"
+)
 CELLRANGER_THREADS = positive_int(cfg("cellranger.threads"), "cellranger.threads")
 CELLRANGER_MEM_GB = positive_int(
     cfg("cellranger.localmem_gb"), "cellranger.localmem_gb"
 )
-COUNT_SAMPLE = str(cfg("cellranger.count_sample"))
-CELLRANGER_ROOT = os.path.join(RESULTS_ROOT, "cellranger")
-CELLRANGER_RUN_DIR = os.path.join(CELLRANGER_ROOT, RUN_ID)
-CELLRANGER_DONE = os.path.join(
-    WORKFLOW_STATE_DIR, f"{RUN_ID}.cellranger_multi.done"
-)
 
-COUNT_DIR = os.path.join(
-    CELLRANGER_RUN_DIR,
-    "outs",
-    "per_sample_outs",
-    COUNT_SAMPLE,
-    "count",
-)
-COUNT_BAM = os.path.join(COUNT_DIR, "sample_alignments.bam")
-COUNT_BARCODES = os.path.join(
-    COUNT_DIR,
-    "sample_filtered_feature_bc_matrix",
-    "barcodes.tsv.gz",
-)
-
+APPTAINER = str(cfg_or_default("souporcell.apptainer", "apptainer"))
 SOUPORCELL_CONTAINER = resolve_path(cfg("souporcell.container"))
-SOUPORCELL_FASTA = resolve_path(cfg("souporcell.reference_fasta"))
+SOUPORCELL_FASTA = resolve_optional_path(
+    cfg_or_default("souporcell.reference_fasta", None)
+) or os.path.join(GEX_REFERENCE, "fasta", "genome.fa")
 SOUPORCELL_THREADS = positive_int(cfg("souporcell.threads"), "souporcell.threads")
-SOUPORCELL_DONORS = positive_int(cfg("souporcell.donors"), "souporcell.donors")
-SOUPORCELL_OUTDIR = resolve_path(
-    cfg_or_default(
-        "souporcell.output_dir",
-        os.path.join(RESULTS_ROOT, "souporcell", RUN_ID),
-    )
-)
-SOUPORCELL_CLUSTERS = os.path.join(SOUPORCELL_OUTDIR, "clusters.tsv")
 SOUPORCELL_COMMON_VARIANTS = resolve_optional_path(
     cfg_or_default("souporcell.common_variants", None)
 )
@@ -170,15 +160,9 @@ SOUPORCELL_OPTIONAL_ARGS = " ".join(
     if arg
 )
 
-ARCASHLA_ROOT = resolve_path(
-    cfg_or_default(
-        "arcashla.output_dir",
-        os.path.join(RESULTS_ROOT, "arcasHLA", RUN_ID),
-    )
-)
 ARCASHLA_TOTAL_THREADS = positive_int(cfg("arcashla.threads"), "arcashla.threads")
 ARCASHLA_PARALLEL_DONORS = positive_int(
-    cfg_or_default("arcashla.parallel_donors", SOUPORCELL_DONORS),
+    cfg_or_default("arcashla.parallel_donors", 4),
     "arcashla.parallel_donors",
 )
 ARCASHLA_DONOR_THREADS = donor_phase_threads(
@@ -202,12 +186,9 @@ SAMTOOLS_CMD = os.path.join(ARCASHLA_ENV_BIN, "samtools")
 SUBSET_BAM = resolve_path(cfg("arcashla.subset_bam"))
 TMP_DIR = resolve_path(cfg("arcashla.tmp_dir"))
 ARCAS_TEMP_DIR = resolve_path(cfg("arcashla.temp_dir"))
-HLA_GENES = str(cfg("arcashla.genes"))
+HLA_GENES = comma_separated(cfg("arcashla.genes"))
 HLA_POPULATION = str(cfg("arcashla.population"))
 
-REFERENCE_HLA_CSV = resolve_optional_path(
-    cfg_or_default("inputs.reference_hla_csv", None)
-)
 MATCHING_GENES = comma_separated(cfg_or_default("matching.genes", "A,B,C"))
 MATCHING_TWO_FIELD_FLAG = (
     "--two-field-resolution"
@@ -218,20 +199,253 @@ MATCHING_TWO_FIELD_FLAG = (
     else "--no-two-field-resolution"
 )
 
+
+# --------------------------------------------------------------------------
+# Sample sheet (config/samples.csv): one row per 10x pool
+# --------------------------------------------------------------------------
+
+SAMPLE_COLUMNS = ["pool", "gex_fastqs", "tcr_fastqs", "n_donors", "hla_csv"]
+OPTIONAL_SAMPLE_COLUMNS = ["gex_fastq_id", "tcr_fastq_id", "expect_cells", "multi_csv"]
+POOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+FASTQ_NAME = re.compile(
+    r"^(?P<id>.+?)_S\d+(?:_L\d{3})?_(?:R[123]|I[12])_\d{3}\.fastq\.gz$"
+)
+
+
+def detect_fastq_id(folder, given, label, where, problems):
+    """Return the Cell Ranger fastq_id (the file name part before _S1_L001_R1_001)."""
+    if not os.path.isdir(folder):
+        problems.append(f"{where}: {label}s folder not found: {folder}")
+        return ""
+
+    ids = sorted({m.group("id") for m in map(FASTQ_NAME.match, os.listdir(folder)) if m})
+    if given:
+        if given not in ids:
+            problems.append(
+                f"{where}: no FASTQ files named {given}_S*_R1_*.fastq.gz in {folder}"
+            )
+        return given
+    if not ids:
+        problems.append(
+            f"{where}: no 10x FASTQ files (like NAME_S1_L001_R1_001.fastq.gz) in {folder}"
+        )
+        return ""
+    if len(ids) > 1:
+        problems.append(
+            f"{where}: {folder} holds FASTQs of several samples ({', '.join(ids)}); "
+            f"add a {label}_id column saying which one to use"
+        )
+        return ""
+    return ids[0]
+
+
+def load_samples(path):
+    if not os.path.isfile(path):
+        raise WorkflowError(
+            f"Sample sheet not found: {path}\n"
+            "Set 'samples' in config/config.yaml (see config/samples.csv)."
+        )
+
+    fieldnames, rows = hla_table.read_table_rows(path)
+    rows = [{key.lower(): value for key, value in row.items()} for row in rows]
+    fieldnames = [name.lower() for name in fieldnames]
+
+    problems, warnings, samples = [], [], {}
+    matching_genes = set(MATCHING_GENES.split(","))
+
+    missing = [column for column in ("pool",) if column not in fieldnames]
+    if "gex_fastqs" not in fieldnames and "multi_csv" not in fieldnames:
+        missing.append("gex_fastqs")
+    if missing:
+        raise WorkflowError(
+            f"{path}: missing column(s) {', '.join(missing)}.\n"
+            f"Expected header: {','.join(SAMPLE_COLUMNS)}"
+        )
+    for name in fieldnames:
+        if name not in SAMPLE_COLUMNS + OPTIONAL_SAMPLE_COLUMNS:
+            warnings.append(f"{path}: column '{name}' is not used and will be ignored")
+    if not rows:
+        problems.append(f"{path}: no pools listed")
+
+    for line_number, row in enumerate(rows, start=2):
+        pool = row.get("pool", "")
+        where = f"samples.csv line {line_number} ({pool or 'no pool name'})"
+        if not POOL_NAME.match(pool):
+            problems.append(
+                f"{where}: the pool name must only use letters, digits, '_', '-' or '.'"
+            )
+            continue
+        if pool in samples:
+            problems.append(f"{where}: pool {pool} is listed twice")
+            continue
+
+        sample = {
+            "pool": pool,
+            "multi_csv": resolve_optional_path(row.get("multi_csv")),
+            "gex_fastqs": resolve_optional_path(row.get("gex_fastqs")) or "",
+            "tcr_fastqs": resolve_optional_path(row.get("tcr_fastqs")) or "",
+            "gex_fastq_id": "",
+            "tcr_fastq_id": "",
+            "expect_cells": DEFAULT_EXPECT_CELLS,
+            "hla_csv": resolve_optional_path(row.get("hla_csv")) or "",
+            "n_donors": None,
+        }
+
+        if sample["multi_csv"]:
+            if not os.path.isfile(sample["multi_csv"]):
+                problems.append(f"{where}: multi_csv not found: {sample['multi_csv']}")
+                sample["has_tcr"] = False
+            else:
+                with open(sample["multi_csv"]) as handle:
+                    sample["has_tcr"] = "vdj-t" in handle.read()
+        else:
+            if not sample["gex_fastqs"]:
+                problems.append(f"{where}: gex_fastqs is empty")
+            else:
+                sample["gex_fastq_id"] = detect_fastq_id(
+                    sample["gex_fastqs"], row.get("gex_fastq_id", ""), "gex_fastq", where, problems
+                )
+            if sample["tcr_fastqs"]:
+                sample["tcr_fastq_id"] = detect_fastq_id(
+                    sample["tcr_fastqs"], row.get("tcr_fastq_id", ""), "tcr_fastq", where, problems
+                )
+            sample["has_tcr"] = bool(sample["tcr_fastqs"])
+
+        if row.get("expect_cells"):
+            try:
+                sample["expect_cells"] = positive_int(row["expect_cells"], "expect_cells")
+            except ValueError:
+                problems.append(f"{where}: expect_cells must be a whole number")
+
+        if sample["has_tcr"] and not VDJ_REFERENCE and not sample["multi_csv"]:
+            problems.append(
+                f"{where}: has TCR FASTQs but cellranger.vdj_reference is empty in config.yaml"
+            )
+
+        n_hla_donors = None
+        if sample["hla_csv"]:
+            try:
+                table = hla_table.read_hla_table(sample["hla_csv"])
+            except hla_table.HLATableError as error:
+                problems.append(f"{where}: problem in the HLA table {error}")
+            else:
+                n_hla_donors = len(table.donors)
+                if not matching_genes & set(table.genes):
+                    problems.append(
+                        f"{where}: the HLA table has genes {', '.join(table.genes)} "
+                        f"but matching uses {MATCHING_GENES} (matching.genes in config.yaml)"
+                    )
+                for column in table.ignored_columns:
+                    warnings.append(
+                        f"{where}: HLA table column '{column}' is not an HLA column "
+                        "(expected names like A_1, A_2) and is ignored"
+                    )
+
+        n_donors = row.get("n_donors", "")
+        if n_donors:
+            try:
+                sample["n_donors"] = int(n_donors)
+            except ValueError:
+                problems.append(f"{where}: n_donors must be a whole number, got {n_donors!r}")
+            else:
+                if sample["n_donors"] < 2:
+                    problems.append(f"{where}: n_donors must be at least 2")
+        elif n_hla_donors:
+            sample["n_donors"] = n_hla_donors
+        else:
+            problems.append(
+                f"{where}: n_donors is empty (fill it in, or give an hla_csv and its "
+                "number of donors is used)"
+            )
+
+        if n_hla_donors and sample["n_donors"] and n_hla_donors != sample["n_donors"]:
+            warnings.append(
+                f"{where}: n_donors is {sample['n_donors']} but the HLA table lists "
+                f"{n_hla_donors} donors; donors missing from the table keep their "
+                "souporcell cluster name"
+            )
+
+        samples[pool] = sample
+
+    return samples, problems, warnings
+
+
+def check_tools(samples):
+    problems = []
+    needed = [
+        ("cellranger.executable", CELLRANGER, os.path.isfile),
+        ("cellranger.gex_reference", GEX_REFERENCE, os.path.isdir),
+        ("souporcell.container", SOUPORCELL_CONTAINER, os.path.isfile),
+        ("souporcell.reference_fasta", SOUPORCELL_FASTA, os.path.isfile),
+        ("arcashla.env_bin (arcasHLA)", ARCASHLA_CMD, os.path.isfile),
+        ("arcashla.env_bin (samtools)", SAMTOOLS_CMD, os.path.isfile),
+        ("arcashla.subset_bam", SUBSET_BAM, os.path.isfile),
+    ]
+    if VDJ_REFERENCE and any(sample["has_tcr"] for sample in samples.values()):
+        needed.append(("cellranger.vdj_reference", VDJ_REFERENCE, os.path.isdir))
+
+    for label, path, exists in needed:
+        if not exists(path):
+            problems.append(f"config.yaml {label}: not found: {path}")
+    return problems
+
+
+SAMPLES, _problems, _warnings = load_samples(SAMPLES_CSV)
+_problems += check_tools(SAMPLES)
+
+for _warning in _warnings:
+    print(f"[warning] {_warning}", file=sys.stderr)
+if _problems:
+    raise WorkflowError(
+        "Please fix these problems before running scHLA-demux:\n"
+        + "\n".join(f"  - {problem}" for problem in _problems)
+    )
+
+POOLS = list(SAMPLES)
+
+for _sample in SAMPLES.values():
+    print(
+        f"[scHLA-demux] pool {_sample['pool']}: "
+        f"{'GEX + TCR' if _sample['has_tcr'] else 'GEX only'}, "
+        f"{_sample['n_donors']} donors, "
+        f"HLA table: {_sample['hla_csv'] or 'none (clusters keep souporcell names)'}",
+        file=sys.stderr,
+    )
+
+
+wildcard_constraints:
+    pool="|".join(re.escape(pool) for pool in POOLS),
+    donor=r"\d+",
+
+
+# --------------------------------------------------------------------------
+# Output layout: results/<pool>/...
+# --------------------------------------------------------------------------
+
+POOL_DIR = os.path.join(RESULTS_ROOT, "{pool}")
+MULTI_CSV = os.path.join(POOL_DIR, "cellranger_multi.csv")
+CELLRANGER_RUN_DIR = os.path.join(POOL_DIR, "cellranger")
+CELLRANGER_DONE = os.path.join(POOL_DIR, "snakemake_state", "cellranger_multi.done")
+SOUPORCELL_CLUSTERS = os.path.join(POOL_DIR, "souporcell", "clusters.tsv")
+
+ARCASHLA_ROOT = os.path.join(POOL_DIR, "arcasHLA")
 BARCODE_DIR = os.path.join(ARCASHLA_ROOT, "barcode_lists")
 FILTERED_BAM_DIR = os.path.join(ARCASHLA_ROOT, "donor_bam")
 EXTRACTED_FASTQ_DIR = os.path.join(ARCASHLA_ROOT, "extracted_fastq")
 GENOTYPE_DIR = os.path.join(ARCASHLA_ROOT, "genotype")
 
-REPORT_DIR = os.path.join(RESULTS_ROOT, "reports", RUN_ID)
-GENOTYPE_SUMMARY_CSV = os.path.join(
-    REPORT_DIR, "souporcell_cluster_hla_summary.csv"
-)
+REPORT_DIR = os.path.join(POOL_DIR, "reports")
+GENOTYPE_SUMMARY_CSV = os.path.join(REPORT_DIR, "souporcell_cluster_hla_summary.csv")
 ASSIGNMENT_CSV = os.path.join(REPORT_DIR, "cluster_to_donor_assignments.csv")
 MATCH_SCORE_CSV = os.path.join(REPORT_DIR, "donor_match_scores.csv")
 
-DEMULTIPLEX_DIR = os.path.join(RESULTS_ROOT, "demultiplexed", RUN_ID)
+DEMULTIPLEX_DIR = os.path.join(POOL_DIR, "demultiplexed")
 DEMULTIPLEX_MANIFEST = os.path.join(DEMULTIPLEX_DIR, "manifest.tsv")
+CELL_TABLE = os.path.join(DEMULTIPLEX_DIR, "cell_to_donor.csv")
+
+ALL_POOLS_DONORS = os.path.join(RESULTS_ROOT, "all_pools_donors.csv")
+ALL_POOLS_CELLS = os.path.join(RESULTS_ROOT, "all_pools_cell_to_donor.csv")
+QC_REPORT = os.path.join(RESULTS_ROOT, "qc_report.html")
 
 
 def donor_sort_key(donor):
@@ -241,30 +455,41 @@ def donor_sort_key(donor):
     return (1, donor)
 
 
-def get_count_bam(_wildcards=None):
-    checkpoints.cellranger_multi.get()
+def cellranger_sample_dir(pool):
+    """outs/per_sample_outs/<sample>/ of a finished Cell Ranger multi run."""
+    checkpoints.cellranger_multi.get(pool=pool)
 
-    if not os.path.exists(COUNT_BAM):
-        raise FileNotFoundError(f"Cell Ranger BAM not found: {COUNT_BAM}")
-
-    return COUNT_BAM
-
-
-def get_count_barcodes(_wildcards=None):
-    checkpoints.cellranger_multi.get()
-
-    if not os.path.exists(COUNT_BARCODES):
-        raise FileNotFoundError(f"Cell Ranger barcodes file not found: {COUNT_BARCODES}")
-
-    return COUNT_BARCODES
-
-
-def get_clusters_file(_wildcards=None):
-    return checkpoints.run_souporcell.get().output.clusters
+    run_dir = CELLRANGER_RUN_DIR.format(pool=pool)
+    bams = sorted(
+        glob.glob(
+            os.path.join(run_dir, "outs", "per_sample_outs", "*", "count", "sample_alignments.bam")
+        )
+    )
+    if len(bams) != 1:
+        raise WorkflowError(
+            f"Expected exactly one Cell Ranger sample BAM under "
+            f"{run_dir}/outs/per_sample_outs/, found {len(bams)}"
+        )
+    return os.path.dirname(os.path.dirname(bams[0]))
 
 
-def get_singlet_donors():
-    clusters_path = get_clusters_file()
+def get_count_bam(wildcards):
+    return os.path.join(
+        cellranger_sample_dir(wildcards.pool), "count", "sample_alignments.bam"
+    )
+
+
+def get_count_barcodes(wildcards):
+    return os.path.join(
+        cellranger_sample_dir(wildcards.pool),
+        "count",
+        "sample_filtered_feature_bc_matrix",
+        "barcodes.tsv.gz",
+    )
+
+
+def get_singlet_donors(pool):
+    clusters_path = checkpoints.run_souporcell.get(pool=pool).output.clusters
 
     if not os.path.exists(clusters_path):
         raise FileNotFoundError(f"Souporcell clusters file not found: {clusters_path}")
@@ -289,20 +514,31 @@ def get_singlet_donors():
     return donors
 
 
-def genotype_json_inputs(_wildcards):
-    donors = get_singlet_donors()
+def genotype_json_inputs(wildcards):
+    donors = get_singlet_donors(wildcards.pool)
     return expand(
         os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.json"),
+        pool=wildcards.pool,
         donor=donors,
     )
 
 
-def publish_inputs(_wildcards):
-    donors = get_singlet_donors()
+def tcr_contigs_path(pool):
+    return os.path.join(
+        cellranger_sample_dir(pool), "vdj_t", "filtered_contig_annotations.csv"
+    )
+
+
+def publish_inputs(wildcards):
+    pool = wildcards.pool
+    donors = get_singlet_donors(pool)
     inputs = [
-        ASSIGNMENT_CSV,
-        GENOTYPE_SUMMARY_CSV,
+        ASSIGNMENT_CSV.format(pool=pool),
+        GENOTYPE_SUMMARY_CSV.format(pool=pool),
+        SOUPORCELL_CLUSTERS.format(pool=pool),
     ]
+    if SAMPLES[pool]["has_tcr"]:
+        inputs.append(tcr_contigs_path(pool))
 
     patterns = [
         os.path.join(BARCODE_DIR, "donor{donor}_barcodes.txt"),
@@ -314,60 +550,115 @@ def publish_inputs(_wildcards):
         os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.json"),
         os.path.join(GENOTYPE_DIR, "donor{donor}_filtered.genotype.log"),
     ]
-
     for pattern in patterns:
-        inputs.extend(expand(pattern, donor=donors))
+        inputs.extend(expand(pattern, pool=pool, donor=donors))
 
     return inputs
 
 
+def publish_tcr_arg(wildcards):
+    """--tcr-contigs for TCR pools. Shell params must not need the checkpoint (dry runs)."""
+    if not SAMPLES[wildcards.pool]["has_tcr"]:
+        return ""
+    found = glob.glob(
+        os.path.join(
+            CELLRANGER_RUN_DIR.format(pool=wildcards.pool),
+            "outs", "per_sample_outs", "*", "vdj_t", "filtered_contig_annotations.csv",
+        )
+    )
+    path = found[0] if found else "<vdj_t/filtered_contig_annotations.csv after Cell Ranger>"
+    return f"--tcr-contigs {shlex.quote(path)}"
+
+
+def make_multi_csv_args(wildcards):
+    sample = SAMPLES[wildcards.pool]
+    if sample["multi_csv"]:
+        return ""
+
+    args = [
+        "--gex-reference", GEX_REFERENCE,
+        "--gex-fastqs", sample["gex_fastqs"],
+        "--gex-fastq-id", sample["gex_fastq_id"],
+    ]
+    if sample["tcr_fastqs"]:
+        args += [
+            "--vdj-reference", VDJ_REFERENCE,
+            "--tcr-fastqs", sample["tcr_fastqs"],
+            "--tcr-fastq-id", sample["tcr_fastq_id"],
+        ]
+    if sample["expect_cells"]:
+        args += ["--expect-cells", str(sample["expect_cells"])]
+    return " ".join(shlex.quote(arg) for arg in args)
+
+
 rule all:
     input:
-        GENOTYPE_SUMMARY_CSV,
-        ASSIGNMENT_CSV,
-        MATCH_SCORE_CSV,
-        DEMULTIPLEX_MANIFEST
+        expand(GENOTYPE_SUMMARY_CSV, pool=POOLS),
+        expand(ASSIGNMENT_CSV, pool=POOLS),
+        expand(MATCH_SCORE_CSV, pool=POOLS),
+        expand(DEMULTIPLEX_MANIFEST, pool=POOLS),
+        ALL_POOLS_DONORS,
+        ALL_POOLS_CELLS,
+        QC_REPORT
+
+
+rule make_multi_csv:
+    input:
+        lambda wildcards: [SAMPLES[wildcards.pool]["multi_csv"]] if SAMPLES[wildcards.pool]["multi_csv"] else []
+    output:
+        csv=MULTI_CSV
+    params:
+        script=MULTI_CSV_SCRIPT,
+        user_csv=lambda wildcards: SAMPLES[wildcards.pool]["multi_csv"] or "",
+        args=make_multi_csv_args
+    shell:
+        r"""
+        set -euo pipefail
+
+        if [ -n "{params.user_csv}" ]; then
+          cp "{params.user_csv}" "{output.csv}"
+        else
+          "{PYTHON}" "{params.script}" {params.args} --output "{output.csv}"
+        fi
+        """
 
 
 checkpoint cellranger_multi:
     input:
-        csv=CELLRANGER_MULTI_CSV
+        csv=MULTI_CSV
     output:
         done=CELLRANGER_DONE
     threads:
         CELLRANGER_THREADS
     params:
         cellranger=CELLRANGER,
-        run_id=RUN_ID,
-        run_root=CELLRANGER_ROOT,
         localmem=CELLRANGER_MEM_GB,
-        done_dir=os.path.dirname(CELLRANGER_DONE),
-        count_bam=COUNT_BAM,
-        count_barcodes=COUNT_BARCODES
+        run_dir=lambda wildcards: CELLRANGER_RUN_DIR.format(pool=wildcards.pool)
     shell:
         r"""
         set -euo pipefail
-        mkdir -p "{params.run_root}" "{params.done_dir}"
+        pool_dir="$(dirname "{params.run_dir}")"
+        mkdir -p "$pool_dir"
         rm -f "{output.done}"
 
-        if [ -s "{params.count_bam}" ] && [ -s "{params.count_barcodes}" ]; then
+        existing_bam="$(compgen -G "{params.run_dir}/outs/per_sample_outs/*/count/sample_alignments.bam" | head -n 1 || true)"
+        if [ -n "$existing_bam" ]; then
           touch "{output.done}"
-          printf '[%s] Reusing existing Cell Ranger outputs: %s\n' "$(date '+%F %T')" "{params.count_bam}"
+          printf '[%s] Reusing existing Cell Ranger outputs: %s\n' "$(date '+%F %T')" "$existing_bam"
           exit 0
         fi
 
-        cd "{params.run_root}"
+        cd "$pool_dir"
 
         "{params.cellranger}" multi \
-          --id="{params.run_id}" \
+          --id="$(basename "{params.run_dir}")" \
           --csv="{input.csv}" \
           --localcores="{threads}" \
           --localmem="{params.localmem}"
 
-        test -s "{params.count_bam}"
-        test -s "{params.count_barcodes}"
+        compgen -G "{params.run_dir}/outs/per_sample_outs/*/count/sample_alignments.bam" > /dev/null
         touch "{output.done}"
-        printf '[%s] Finished cellranger_multi: run_id=%s threads=%s\n' "$(date '+%F %T')" "{params.run_id}" "{threads}"
+        printf '[%s] Finished cellranger_multi: pool=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.pool}" "{threads}"
         """
 
 
@@ -382,33 +673,32 @@ checkpoint run_souporcell:
     threads:
         SOUPORCELL_THREADS
     params:
-        donors=SOUPORCELL_DONORS,
-        outdir=SOUPORCELL_OUTDIR,
-        outdir_parent=os.path.dirname(SOUPORCELL_OUTDIR),
+        apptainer=APPTAINER,
+        donors=lambda wildcards: SAMPLES[wildcards.pool]["n_donors"],
         optional_args=SOUPORCELL_OPTIONAL_ARGS
     shell:
         r"""
         set -euo pipefail
-        mkdir -p "{params.outdir_parent}"
+        outdir="$(dirname "{output.clusters}")"
 
         if [ -s "{output.clusters}" ]; then
           printf '[%s] Reusing existing souporcell output: %s\n' "$(date '+%F %T')" "{output.clusters}"
           exit 0
         fi
 
-        if [ -d "{params.outdir}" ]; then
-          backup_dir="{params.outdir}.partial.$(date '+%Y%m%d_%H%M%S')"
-          mv "{params.outdir}" "$backup_dir"
+        if [ -d "$outdir" ] && [ -n "$(ls -A "$outdir")" ]; then
+          backup_dir="$outdir.partial.$(date '+%Y%m%d_%H%M%S')"
+          mv "$outdir" "$backup_dir"
           printf '[%s] Moved incomplete souporcell output to %s\n' "$(date '+%F %T')" "$backup_dir"
         fi
 
-        apptainer exec "{input.container}" \
+        "{params.apptainer}" exec "{input.container}" \
           souporcell_pipeline.py \
           -i "{input.bam}" \
           -b "{input.barcodes}" \
           -f "{input.fasta}" \
           -t "{threads}" \
-          -o "{params.outdir}" \
+          -o "$outdir" \
           -k "{params.donors}" {params.optional_args}
 
         test -s "{output.clusters}"
@@ -418,17 +708,16 @@ checkpoint run_souporcell:
 
 rule make_donor_barcodes:
     input:
-        clusters=get_clusters_file
+        clusters=SOUPORCELL_CLUSTERS
     output:
         barcode_list=os.path.join(BARCODE_DIR, "donor{donor}_barcodes.txt")
     shell:
         r"""
         set -euo pipefail
-        mkdir -p "{BARCODE_DIR}"
 
         awk -F '\t' '$2=="singlet" && $3=="{wildcards.donor}" {{print $1}}' \
           "{input.clusters}" > "{output.barcode_list}"
-        printf '[%s] Finished make_donor_barcodes: donor=%s\n' "$(date '+%F %T')" "{wildcards.donor}"
+        printf '[%s] Finished make_donor_barcodes: pool=%s donor=%s\n' "$(date '+%F %T')" "{wildcards.pool}" "{wildcards.donor}"
         """
 
 
@@ -448,7 +737,7 @@ rule filter_donor_bam:
     shell:
         r"""
         set -euo pipefail
-        mkdir -p "{FILTERED_BAM_DIR}"
+        mkdir -p "{params.tmpdir}"
         export TMPDIR="{params.tmpdir}"
 
         "{params.subset_bam}" \
@@ -458,7 +747,7 @@ rule filter_donor_bam:
           --cores "{threads}"
 
         "{params.samtools}" index -@ "{threads}" "{output.bam}"
-        printf '[%s] Finished filter_donor_bam: donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.donor}" "{threads}"
+        printf '[%s] Finished filter_donor_bam: pool=%s donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.pool}" "{wildcards.donor}" "{threads}"
         """
 
 
@@ -473,21 +762,21 @@ rule extract_donor_fastq:
     params:
         arcas=ARCASHLA_CMD,
         env_bin=ARCASHLA_ENV_BIN,
-        outdir=EXTRACTED_FASTQ_DIR,
-        temp=ARCAS_TEMP_DIR
+        temp=lambda wildcards: os.path.join(ARCAS_TEMP_DIR, wildcards.pool)
     shell:
         r"""
         set -euo pipefail
-        mkdir -p "{params.outdir}" "{params.temp}"
+        outdir="$(dirname "{output.fq}")"
+        mkdir -p "{params.temp}"
         export PATH="{params.env_bin}:$PATH"
 
         "{params.arcas}" extract "{input.bam}" \
           --single \
-          -o "{params.outdir}" \
+          -o "$outdir" \
           -t "{threads}" \
           -v \
           --temp "{params.temp}"
-        printf '[%s] Finished extract_donor_fastq: donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.donor}" "{threads}"
+        printf '[%s] Finished extract_donor_fastq: pool=%s donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.pool}" "{wildcards.donor}" "{threads}"
         """
 
 
@@ -506,23 +795,23 @@ rule genotype_donor:
         env_bin=ARCASHLA_ENV_BIN,
         genes=HLA_GENES,
         population=HLA_POPULATION,
-        outdir=GENOTYPE_DIR,
-        temp=ARCAS_TEMP_DIR
+        temp=lambda wildcards: os.path.join(ARCAS_TEMP_DIR, wildcards.pool)
     shell:
         r"""
         set -euo pipefail
-        mkdir -p "{params.outdir}" "{params.temp}"
+        outdir="$(dirname "{output.genotype}")"
+        mkdir -p "{params.temp}"
         export PATH="{params.env_bin}:$PATH"
 
         "{params.arcas}" genotype "{input.fq}" \
           --single \
           -g "{params.genes}" \
-          -o "{params.outdir}" \
+          -o "$outdir" \
           -t "{threads}" \
           -p "{params.population}" \
           -v \
           --temp "{params.temp}"
-        printf '[%s] Finished genotype_donor: donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.donor}" "{threads}"
+        printf '[%s] Finished genotype_donor: pool=%s donor=%s threads=%s\n' "$(date '+%F %T')" "{wildcards.pool}" "{wildcards.donor}" "{threads}"
         """
 
 
@@ -533,14 +822,12 @@ rule summarize_genotypes:
         csv=GENOTYPE_SUMMARY_CSV
     params:
         script=GENOTYPE_SUMMARY_SCRIPT,
-        input_dir=GENOTYPE_DIR,
-        report_dir=REPORT_DIR
+        input_dir=lambda wildcards: GENOTYPE_DIR.format(pool=wildcards.pool)
     shell:
         r"""
         set -euo pipefail
-        mkdir -p "{params.report_dir}"
 
-        python3 "{params.script}" \
+        "{PYTHON}" "{params.script}" \
           --input-dir "{params.input_dir}" \
           --output-csv "{output.csv}"
         printf '[%s] Finished summarize_genotypes: output=%s\n' "$(date '+%F %T')" "{output.csv}"
@@ -549,13 +836,14 @@ rule summarize_genotypes:
 
 rule build_donor_assignments:
     input:
-        summary=GENOTYPE_SUMMARY_CSV
+        summary=GENOTYPE_SUMMARY_CSV,
+        reference=lambda wildcards: [SAMPLES[wildcards.pool]["hla_csv"]] if SAMPLES[wildcards.pool]["hla_csv"] else []
     output:
         assignment=ASSIGNMENT_CSV,
         score=MATCH_SCORE_CSV
     params:
         script=ASSIGNMENT_SCRIPT,
-        reference=REFERENCE_HLA_CSV or "",
+        reference=lambda wildcards: SAMPLES[wildcards.pool]["hla_csv"],
         genes=MATCHING_GENES,
         two_field_flag=MATCHING_TWO_FIELD_FLAG
     shell:
@@ -567,7 +855,7 @@ rule build_donor_assignments:
           reference_arg+=(--reference-csv "{params.reference}")
         fi
 
-        python3 "{params.script}" \
+        "{PYTHON}" "{params.script}" \
           --genotype-summary "{input.summary}" \
           --assignment-csv "{output.assignment}" \
           --score-csv "{output.score}" \
@@ -582,28 +870,77 @@ rule publish_demultiplexed:
     input:
         publish_inputs
     output:
-        manifest=DEMULTIPLEX_MANIFEST
+        manifest=DEMULTIPLEX_MANIFEST,
+        cell_table=CELL_TABLE
     params:
         script=PUBLISH_SCRIPT,
-        assignment_csv=ASSIGNMENT_CSV,
-        genotype_summary=GENOTYPE_SUMMARY_CSV,
-        barcode_dir=BARCODE_DIR,
-        bam_dir=FILTERED_BAM_DIR,
-        fastq_dir=EXTRACTED_FASTQ_DIR,
-        genotype_dir=GENOTYPE_DIR,
-        output_dir=DEMULTIPLEX_DIR
+        clusters=lambda wildcards: SOUPORCELL_CLUSTERS.format(pool=wildcards.pool),
+        assignment=lambda wildcards: ASSIGNMENT_CSV.format(pool=wildcards.pool),
+        summary=lambda wildcards: GENOTYPE_SUMMARY_CSV.format(pool=wildcards.pool),
+        tcr_arg=publish_tcr_arg,
+        barcode_dir=lambda wildcards: BARCODE_DIR.format(pool=wildcards.pool),
+        bam_dir=lambda wildcards: FILTERED_BAM_DIR.format(pool=wildcards.pool),
+        fastq_dir=lambda wildcards: EXTRACTED_FASTQ_DIR.format(pool=wildcards.pool),
+        genotype_dir=lambda wildcards: GENOTYPE_DIR.format(pool=wildcards.pool),
+        output_dir=lambda wildcards: DEMULTIPLEX_DIR.format(pool=wildcards.pool)
     shell:
         r"""
         set -euo pipefail
 
-        python3 "{params.script}" \
-          --assignment-csv "{params.assignment_csv}" \
-          --genotype-summary "{params.genotype_summary}" \
+        "{PYTHON}" "{params.script}" \
+          --pool "{wildcards.pool}" \
+          --clusters "{params.clusters}" \
+          --assignment-csv "{params.assignment}" \
+          --genotype-summary "{params.summary}" \
           --barcode-dir "{params.barcode_dir}" \
           --bam-dir "{params.bam_dir}" \
           --fastq-dir "{params.fastq_dir}" \
           --genotype-dir "{params.genotype_dir}" \
           --output-dir "{params.output_dir}" \
-          --manifest "{output.manifest}"
+          --manifest "{output.manifest}" \
+          --cell-table "{output.cell_table}" {params.tcr_arg}
         printf '[%s] Finished publish_demultiplexed: output=%s\n' "$(date '+%F %T')" "{output.manifest}"
+        """
+
+
+rule summarize_pools:
+    input:
+        manifests=expand(DEMULTIPLEX_MANIFEST, pool=POOLS),
+        cell_tables=expand(CELL_TABLE, pool=POOLS)
+    output:
+        donors=ALL_POOLS_DONORS,
+        cells=ALL_POOLS_CELLS
+    params:
+        script=POOLS_SUMMARY_SCRIPT
+    shell:
+        r"""
+        set -euo pipefail
+
+        "{PYTHON}" "{params.script}" \
+          --manifests {input.manifests:q} \
+          --cell-tables {input.cell_tables:q} \
+          --donor-summary "{output.donors}" \
+          --cell-summary "{output.cells}"
+        """
+
+
+rule qc_report:
+    input:
+        manifests=expand(DEMULTIPLEX_MANIFEST, pool=POOLS),
+        scores=expand(MATCH_SCORE_CSV, pool=POOLS)
+    output:
+        html=QC_REPORT
+    params:
+        script=QC_REPORT_SCRIPT,
+        pools=" ".join(shlex.quote(f"{pool}={SAMPLES[pool]['n_donors']}") for pool in POOLS),
+        genes=MATCHING_GENES
+    shell:
+        r"""
+        set -euo pipefail
+
+        "{PYTHON}" "{params.script}" \
+          --results-dir "{RESULTS_ROOT}" \
+          --pools {params.pools} \
+          --matching-genes "{params.genes}" \
+          --output "{output.html}"
         """

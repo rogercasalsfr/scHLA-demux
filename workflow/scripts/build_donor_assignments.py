@@ -2,9 +2,10 @@
 
 import argparse
 import csv
-import re
 from collections import Counter
 from pathlib import Path
+
+import hla_table
 
 
 ASSIGNMENT_COLUMNS = [
@@ -66,22 +67,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def read_csv(path):
-    with Path(path).open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        if reader.fieldnames is None:
-            raise SystemExit(f"CSV file has no header: {path}")
-
-        rows = []
-        for row in reader:
-            cleaned = {}
-            for key, value in row.items():
-                cleaned[key] = value.strip() if isinstance(value, str) else value
-            rows.append(cleaned)
-
-    return reader.fieldnames, rows
-
-
 def write_csv(path, fieldnames, rows):
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,29 +79,6 @@ def write_csv(path, fieldnames, rows):
 
 def parse_gene_list(value):
     return [gene.strip() for gene in str(value).split(",") if gene.strip()]
-
-
-def allele_columns(fieldnames):
-    return [
-        column
-        for column in fieldnames
-        if column and column.endswith("_alleles") and column != "all_alleles"
-    ]
-
-
-def gene_from_column(column):
-    return re.sub(r"_alleles$", "", column)
-
-
-def split_alleles(value):
-    if value is None:
-        return []
-
-    text = str(value).strip()
-    if not text or text.lower() in {"na", "nan", "none"}:
-        return []
-
-    return [item.strip() for item in re.split(r"\s*(?:\||;|,)\s*", text) if item.strip()]
 
 
 def normalize_allele(allele, two_field_resolution):
@@ -132,13 +94,12 @@ def normalize_allele(allele, two_field_resolution):
     return f"{gene}*{':'.join(fields[:2])}"
 
 
-def build_profile(row, genes, two_field_resolution):
+def build_profile(alleles_by_gene, genes, two_field_resolution):
     profile = {}
     for gene in genes:
-        column = f"{gene}_alleles"
         alleles = {
             normalize_allele(allele, two_field_resolution)
-            for allele in split_alleles(row.get(column, ""))
+            for allele in alleles_by_gene.get(gene, [])
         }
         alleles.discard("")
         profile[gene] = alleles
@@ -287,21 +248,20 @@ def resolve_assignments(score_rows):
     return assignments
 
 
+def read_table(path, label):
+    try:
+        return hla_table.read_hla_table(path)
+    except hla_table.HLATableError as error:
+        raise SystemExit(f"Could not read the {label}: {error}")
+
+
 def main():
     args = parse_args()
 
-    genotype_fields, genotype_rows = read_csv(args.genotype_summary)
-    if not genotype_rows:
-        raise SystemExit(f"No rows found in genotype summary: {args.genotype_summary}")
+    genotype = read_table(args.genotype_summary, "genotype summary")
 
-    requested_genes = parse_gene_list(args.genes)
-    genotype_gene_columns = set(allele_columns(genotype_fields))
-    requested_gene_columns = {f"{gene}_alleles" for gene in requested_genes}
-    cluster_genes = [
-        gene_from_column(column)
-        for column in genotype_fields
-        if column in genotype_gene_columns and column in requested_gene_columns
-    ]
+    requested_genes = [gene.upper() for gene in parse_gene_list(args.genes)]
+    cluster_genes = [gene for gene in genotype.genes if gene in requested_genes]
 
     if not cluster_genes:
         raise SystemExit(
@@ -309,8 +269,8 @@ def main():
         )
 
     cluster_profiles = {
-        row["donor"]: build_profile(row, cluster_genes, args.two_field_resolution)
-        for row in genotype_rows
+        cluster_name: build_profile(alleles, cluster_genes, args.two_field_resolution)
+        for cluster_name, alleles in genotype.donors.items()
     }
 
     score_rows = []
@@ -325,16 +285,8 @@ def main():
             for cluster_name in sorted(cluster_profiles)
         ]
     else:
-        reference_fields, reference_rows = read_csv(args.reference_csv)
-        if not reference_rows:
-            raise SystemExit(f"No rows found in reference HLA CSV: {args.reference_csv}")
-
-        reference_gene_columns = set(allele_columns(reference_fields))
-        shared_genes = [
-            gene
-            for gene in cluster_genes
-            if f"{gene}_alleles" in reference_gene_columns
-        ]
+        reference = read_table(args.reference_csv, "donor HLA table")
+        shared_genes = [gene for gene in cluster_genes if gene in reference.genes]
 
         if not shared_genes:
             assignments = [
@@ -349,16 +301,10 @@ def main():
                 for cluster_name in sorted(cluster_profiles)
             ]
         else:
-            reference_profiles = {}
-            for row in reference_rows:
-                donor_name = row.get("donor", "").strip()
-                if not donor_name:
-                    raise SystemExit(
-                        "Every row in the reference HLA CSV must include a donor value."
-                    )
-                reference_profiles[donor_name] = build_profile(
-                    row, shared_genes, args.two_field_resolution
-                )
+            reference_profiles = {
+                donor_name: build_profile(alleles, shared_genes, args.two_field_resolution)
+                for donor_name, alleles in reference.donors.items()
+            }
 
             for cluster_name, cluster_profile in sorted(cluster_profiles.items()):
                 for reference_name, reference_profile in sorted(reference_profiles.items()):

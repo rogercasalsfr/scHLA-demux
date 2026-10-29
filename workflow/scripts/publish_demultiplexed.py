@@ -5,13 +5,21 @@ import csv
 import re
 from pathlib import Path
 
+import hla_table
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Collect donor-specific barcode, BAM, FASTQ, and genotype outputs into "
-            "one demultiplexed folder per donor."
+            "Collect donor-specific barcode, BAM, FASTQ, genotype and TCR outputs "
+            "into one demultiplexed folder per donor, plus a cell-to-donor table."
         )
+    )
+    parser.add_argument("--pool", required=True)
+    parser.add_argument("--clusters", required=True, help="souporcell clusters.tsv")
+    parser.add_argument(
+        "--tcr-contigs",
+        help="Cell Ranger vdj_t/filtered_contig_annotations.csv (TCR runs only).",
     )
     parser.add_argument("--assignment-csv", required=True)
     parser.add_argument("--genotype-summary", required=True)
@@ -21,6 +29,7 @@ def parse_args():
     parser.add_argument("--genotype-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--cell-table", required=True)
     return parser.parse_args()
 
 
@@ -86,21 +95,60 @@ def expected_artifacts(cluster_donor, barcode_dir, bam_dir, fastq_dir, genotype_
     }
 
 
+def read_barcodes(path):
+    with Path(path).open() as handle:
+        return {line.strip() for line in handle if line.strip()}
+
+
+def read_tcr_contigs(path):
+    with Path(path).open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        return reader.fieldnames, list(reader)
+
+
+def write_tcr_contigs(path, fieldnames, rows):
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_cell_table(path, pool, clusters_path, label_by_cluster):
+    """One row per cell barcode with its souporcell call and published donor label."""
+    with Path(clusters_path).open() as handle, Path(path).open("w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(
+            ["pool", "barcode", "donor", "souporcell_status", "souporcell_cluster"]
+        )
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 3 or fields[0] == "barcode":
+                continue
+            barcode, status, cluster = fields[0], fields[1], fields[2]
+            if status == "singlet":
+                donor = label_by_cluster.get(f"donor{cluster}", f"donor{cluster}")
+            else:
+                donor = status  # "doublet" or "unassigned"
+            writer.writerow([pool, barcode, donor, status, cluster])
+
+
 def main():
     args = parse_args()
 
     assignment_fields, assignment_rows = read_csv(args.assignment_csv)
-    summary_fields, summary_rows = read_csv(args.genotype_summary)
+    try:
+        summary = hla_table.read_hla_table(args.genotype_summary)
+    except hla_table.HLATableError as error:
+        raise SystemExit(f"Could not read the genotype summary: {error}")
 
     if not assignment_rows:
         raise SystemExit(f"No rows found in assignment CSV: {args.assignment_csv}")
 
-    summary_by_cluster = {row["donor"]: row for row in summary_rows}
-    allele_columns = [
-        column
-        for column in summary_fields
-        if column and column.endswith("_alleles") and column != "all_alleles"
-    ]
+    allele_columns = hla_table.hla_columns(summary.genes)
+
+    tcr_fields, tcr_rows = (None, None)
+    if args.tcr_contigs:
+        tcr_fields, tcr_rows = read_tcr_contigs(args.tcr_contigs)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -110,7 +158,7 @@ def main():
 
     for row in assignment_rows:
         cluster_donor = row["cluster_donor"]
-        if cluster_donor not in summary_by_cluster:
+        if cluster_donor not in summary.donors:
             raise SystemExit(
                 f"Cluster {cluster_donor} was present in the assignment CSV but not "
                 "in the genotype summary."
@@ -135,8 +183,20 @@ def main():
                 )
             link_file(source_path, donor_dir / link_name)
 
-        summary_row = summary_by_cluster[cluster_donor]
+        barcodes = read_barcodes(artifacts["barcodes.txt"])
+        n_tcr_cells = ""
+        tcr_path = ""
+        if tcr_rows is not None:
+            donor_contigs = [contig for contig in tcr_rows if contig.get("barcode") in barcodes]
+            tcr_path = donor_dir / "tcr_filtered_contig_annotations.csv"
+            write_tcr_contigs(tcr_path, tcr_fields, donor_contigs)
+            n_tcr_cells = len({contig["barcode"] for contig in donor_contigs})
+
         manifest_row = {
+            "pool": args.pool,
+            "donor": published_label,
+            "n_cells": len(barcodes),
+            "n_tcr_cells": n_tcr_cells,
             "cluster_donor": cluster_donor,
             "published_label": published_label,
             "assigned_label": row.get("assigned_label", ""),
@@ -156,15 +216,20 @@ def main():
             "bam_path": str(donor_dir / "sample_alignments.bam"),
             "fastq_path": str(donor_dir / "reads.extracted.fq.gz"),
             "genotype_json_path": str(donor_dir / "hla.genotype.json"),
+            "tcr_contigs_path": str(tcr_path),
         }
 
-        for column in allele_columns:
-            manifest_row[column] = summary_row.get(column, "")
-        manifest_row["all_alleles"] = summary_row.get("all_alleles", "")
+        alleles = summary.donors[cluster_donor]
+        for gene in summary.genes:
+            manifest_row[f"{gene}_1"], manifest_row[f"{gene}_2"] = alleles[gene]
 
         manifest_rows.append(manifest_row)
 
     manifest_fieldnames = [
+        "pool",
+        "donor",
+        "n_cells",
+        "n_tcr_cells",
         "cluster_donor",
         "published_label",
         "assigned_label",
@@ -184,7 +249,8 @@ def main():
         "bam_path",
         "fastq_path",
         "genotype_json_path",
-    ] + allele_columns + ["all_alleles"]
+        "tcr_contigs_path",
+    ] + allele_columns
 
     manifest_path = Path(args.manifest)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,7 +260,11 @@ def main():
         for row in manifest_rows:
             writer.writerow(row)
 
+    label_by_cluster = {row["cluster_donor"]: row["donor"] for row in manifest_rows}
+    write_cell_table(args.cell_table, args.pool, args.clusters, label_by_cluster)
+
     print(f"Wrote demultiplexed manifest to {manifest_path}")
+    print(f"Wrote cell-to-donor table to {args.cell_table}")
 
 
 if __name__ == "__main__":

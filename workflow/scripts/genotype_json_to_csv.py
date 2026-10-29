@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
-import csv
 import json
 import re
 from pathlib import Path
 
-
-PREFERRED_GENE_ORDER = ["A", "B", "C", "DRB1", "DRB2"]
+from hla_table import ordered_genes, write_hla_table
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Convert arcasHLA genotype JSON files into one donor summary CSV."
+        description=(
+            "Convert arcasHLA genotype JSON files into one HLA table "
+            "(donor,A_1,A_2,B_1,B_2,...)."
+        )
     )
     parser.add_argument(
         "--input-dir",
@@ -49,12 +50,6 @@ def normalize_alleles(value):
     return [str(value)]
 
 
-def ordered_genes(all_genes):
-    ordered = [gene for gene in PREFERRED_GENE_ORDER if gene in all_genes]
-    extras = sorted(gene for gene in all_genes if gene not in PREFERRED_GENE_ORDER)
-    return ordered + extras
-
-
 def main():
     args = parse_args()
 
@@ -79,25 +74,19 @@ def main():
         all_genes.update(data.keys())
 
     genes = ordered_genes(all_genes)
-    fieldnames = ["donor"] + [f"{gene}_alleles" for gene in genes] + ["all_alleles"]
+    donors = {}
 
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    for json_file, data in genotype_data:
+        profile = {}
+        for gene in genes:
+            alleles = normalize_alleles(data.get(gene, []))
+            if len(alleles) == 1:
+                # one reported allele = homozygous, same convention as the input table
+                alleles = alleles * 2
+            profile[gene] = alleles[:2]
+        donors[extract_donor_name(json_file)] = profile
 
-    with output_csv.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for json_file, data in genotype_data:
-            row = {"donor": extract_donor_name(json_file)}
-            combined_alleles = []
-
-            for gene in genes:
-                alleles = normalize_alleles(data.get(gene, []))
-                row[f"{gene}_alleles"] = " | ".join(alleles)
-                combined_alleles.extend(alleles)
-
-            row["all_alleles"] = " ; ".join(combined_alleles)
-            writer.writerow(row)
+    write_hla_table(output_csv, genes, donors)
 
     print(f"Wrote {len(genotype_files)} donor summaries to {output_csv}")
 

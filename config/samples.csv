@@ -1,0 +1,2 @@
+pool,gex_fastqs,tcr_fastqs,n_donors,hla_csv
+final_run,/home/rcasals/demultiplexing_pipeline/data/L1216/23J5T3LT4,/home/rcasals/demultiplexing_pipeline/data/L1213/23J5T3LT4,4,
