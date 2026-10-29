@@ -253,7 +253,7 @@ def heatmap(data):
 
 def status_badge(ok):
     if ok is None:
-        return '<span class="badge info">ⓘ Note</span>'
+        return '<span class="badge info">• Note</span>'
     if ok:
         return '<span class="badge good">✓ OK</span>'
     return '<span class="badge warn">⚠ Check</span>'
