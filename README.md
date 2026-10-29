@@ -241,6 +241,7 @@ The helper scripts only use the Python standard library.
 ```text
 scHLA-demux/
 ├── run_slurm.sh                  SLURM launcher
+├── LICENSE                       MIT
 ├── config/
 │   ├── config.yaml               tool paths and settings
 │   ├── samples.csv               the pools to run
@@ -257,3 +258,14 @@ scHLA-demux/
         ├── summarize_pools.py          all-pools summary tables
         └── qc_report.py                QC report (HTML with inline SVG charts)
 ```
+
+## Acknowledgements
+
+scHLA-demux orchestrates existing tools; please cite them if you use it:
+[Cell Ranger](https://www.10xgenomics.com/support/software/cell-ranger),
+[souporcell](https://github.com/wheaton5/souporcell) (Heaton et al., *Nature Methods* 2020) and
+[arcasHLA](https://github.com/RabadanLab/arcasHLA) (Orenbuch et al., *Bioinformatics* 2020).
+
+## License
+
+[MIT](LICENSE) © Roger Casals-Franch
