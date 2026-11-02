@@ -1,5 +1,6 @@
 .snakemake/
 results/
+resources/
 logs/*
 !logs/.gitkeep
 __pycache__/
@@ -7,3 +8,6 @@ __pycache__/
 *.pyo
 *.done
 .DS_Store
+test/data/
+test/results/
+stan_consensus.pickle

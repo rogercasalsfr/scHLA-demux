@@ -1,0 +1,14 @@
+# arcasHLA (HLA genotyping) and samtools. Installed by setup.sh into resources/envs/arcashla.
+#
+# Pinned on purpose: arcasHLA calls `kallisto pseudo`, which kallisto 0.50 removed,
+# and the arcas-hla 0.6.0 build hdfd78af_1 pulls kallisto 0.50.1. Build hdfd78af_2
+# goes back to kallisto 0.44, which needs an older Python.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - arcas-hla=0.6.0=hdfd78af_2
+  - kallisto=0.44.0
+  - samtools
+  - git-lfs

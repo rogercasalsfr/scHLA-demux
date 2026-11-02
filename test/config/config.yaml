@@ -1,0 +1,9 @@
+# Test run on the CellBench 3-cell-line mixture (see test/download_test_data.sh).
+# Settings not given here come from config/config.yaml. Run with ./test/run_test.sh.
+
+samples: test/config/samples.csv
+results_dir: test/results
+
+arcashla:
+  tmp_dir: test/results/.tmp
+  temp_dir: test/results/.tmp_arcashla

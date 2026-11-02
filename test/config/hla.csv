@@ -1,0 +1,4 @@
+donor,A_1,A_2,B_1,B_2,C_1,C_2,source
+H1975,A*01:01,A*01:01,B*41:01,B*41:01,C*17:01,C*17:01,Cellosaurus CVCL_1511 (PMID 26589293)
+H2228,A*02:01,A*03:01,B*07:02,B*38:01,C*07:02,C*12:03,Cellosaurus CVCL_1543 (PMID 26589293)
+HCC827,A*11:01,A*11:01,B*52:01,,C*12:02,C*12:02,Cellosaurus CVCL_2063 (second HLA-B allele differs between PMID 26589293 and 25960936: left empty)

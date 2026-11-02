@@ -1,36 +1,34 @@
 #!/bin/bash
 #SBATCH --job-name=scHLA-demux
-#SBATCH --partition=highmem
-#SBATCH --cpus-per-task=42
-#SBATCH --mem=200G
+#SBATCH --exclusive
+#SBATCH --mem=0
 #SBATCH --time=7-00:00:00
 #SBATCH --output=logs/scHLA-demux_%j.out
 #SBATCH --error=logs/scHLA-demux_%j.err
 #
-# Runs scHLA-demux for every pool in config/samples.csv, in one SLURM job.
-# Submit it from the scHLA-demux folder:
+# Runs scHLA-demux for every pool in config/samples.csv, in one SLURM job that
+# takes a whole node (all its CPUs and memory). Submit it from the scHLA-demux folder:
 #
+#   ./run_slurm.sh --dry-run             # only check the inputs and show the plan (seconds, no SLURM)
 #   sbatch run_slurm.sh                  # run everything
-#   sbatch --cpus-per-task=1 --mem=4G --partition=normal1 \
-#     run_slurm.sh --dry-run             # only check the inputs and show the plan
 #   sbatch run_slurm.sh --configfile config/other_config.yaml
+#   sbatch --partition=highmem run_slurm.sh   # pick a partition (sbatch options override the ones below)
 #
 # Extra arguments are passed to Snakemake. Logs go to logs/scHLA-demux_<jobid>.*
 
 set -euo pipefail
 
-# Snakemake to use. Override with: SNAKEMAKE=/path/to/snakemake sbatch run_slurm.sh
-SNAKEMAKE="${SNAKEMAKE:-/home/rcasals/anaconda3/envs/arcashla_clone/bin/snakemake}"
-
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-CORES="${SLURM_CPUS_PER_TASK:-1}"
+# Snakemake installed by setup.sh. Override with: SNAKEMAKE=/path/to/snakemake sbatch run_slurm.sh
+SNAKEMAKE="${SNAKEMAKE:-${REPO_DIR}/resources/envs/snakemake/bin/snakemake}"
+CORES="${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-$(nproc)}}"
 
 if [ ! -f "${REPO_DIR}/workflow/Snakefile" ]; then
   echo "Submit this script from the scHLA-demux folder (no workflow/Snakefile in ${REPO_DIR})" >&2
   exit 1
 fi
 if [ ! -x "${SNAKEMAKE}" ]; then
-  echo "Snakemake not found at ${SNAKEMAKE}; set SNAKEMAKE=/path/to/snakemake" >&2
+  echo "Snakemake not found at ${SNAKEMAKE}; run ./setup.sh first (or set SNAKEMAKE=/path/to/snakemake)" >&2
   exit 1
 fi
 

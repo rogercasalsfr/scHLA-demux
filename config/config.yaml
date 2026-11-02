@@ -4,7 +4,8 @@
 # sample sheet below. This file holds the tool paths and settings, which you
 # normally set once per cluster.
 #
-# Relative paths are relative to the scHLA-demux folder.
+# Relative paths are relative to the scHLA-demux folder. The tools and
+# references below are installed in resources/ by ./setup.sh.
 
 # One row per 10x pool. See config/samples.csv and the README.
 samples: config/samples.csv
@@ -14,18 +15,19 @@ results_dir: results
 
 
 cellranger:
-  executable: /home/rcasals/cellranger/cellranger-9.0.1/cellranger
-  gex_reference: /home/rcasals/cellranger/refdata-gex-GRCh38-2024-A
+  executable: resources/cellranger/cellranger
+  gex_reference: resources/refdata-gex
   # Only needed when a pool has TCR FASTQs.
-  vdj_reference: /home/rcasals/cellranger/refdata-cellranger-vdj-GRCh38-alts-ensembl-7.1.0
+  vdj_reference: resources/refdata-vdj
   # Leave empty to let Cell Ranger estimate it. Can be set per pool in samples.csv.
   expect_cells: ""
-  threads: 42
-  localmem_gb: 200
+  # auto = every CPU of the SLURM job / 90% of its memory (or of the machine).
+  threads: auto
+  localmem_gb: auto
 
 
 souporcell:
-  container: /home/rcasals/souporcell/souporcell_release.sif
+  container: resources/souporcell_release.sif
   # Command used to run the container (apptainer or singularity).
   apptainer: apptainer
   # Leave empty to use <gex_reference>/fasta/genome.fa.
@@ -40,15 +42,16 @@ souporcell:
 
 arcashla:
   # bin/ folder of the conda env that has both arcasHLA and samtools.
-  env_bin: /home/rcasals/anaconda3/envs/arcashla_clone/bin
-  subset_bam: /home/rcasals/software_roger/subset-bam
-  tmp_dir: /home/rcasals/tmp
-  temp_dir: /home/rcasals/tmp_arcashla
+  env_bin: resources/envs/arcashla/bin
+  subset_bam: resources/bin/subset-bam
+  tmp_dir: results/.tmp
+  temp_dir: results/.tmp_arcashla
   # HLA genes to genotype, and the arcasHLA population prior.
   genes: A,B,C,DRB1,DRB2
   population: caucasian
-  # Thread budget for the per-donor phase, shared by parallel_donors donors.
-  threads: 42
+  # Thread budget for the per-donor phase, shared by parallel_donors donors
+  # (auto = every CPU of the job).
+  threads: auto
   parallel_donors: 4
   # Optional per-step overrides (default: threads / parallel_donors).
   # filter_threads: 10
@@ -57,7 +60,17 @@ arcashla:
 
 
 matching:
-  # Genes compared between the arcasHLA calls and your donor HLA table.
+  # reads: score each patient's HLA typing against the cluster's HLA reads (the
+  # default; it does not depend on arcasHLA's final call, which can be wrong on
+  # 10x data). alleles: compare arcasHLA's calls with the typing, allele by allele.
+  method: reads
+  # Genes compared between the clusters and your donor HLA table.
   genes: A,B,C
-  # Compare alleles at two-field resolution (A*02:01:01 counts as A*02:01).
+  # Use the HLA table at two-field resolution at most (A*02:01:01 counts as A*02:01).
   two_field_resolution: true
+  # reads only: a cluster is named after a patient only if the patient's typing
+  # explains its HLA reads at least this well (mean over genes; 1.0 = as well as
+  # the best HLA type), and is reported ambiguous if another naming comes closer
+  # than min_margin.
+  min_read_fit: 0.90
+  min_margin: 0.03

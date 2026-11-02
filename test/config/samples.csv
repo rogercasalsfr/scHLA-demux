@@ -1,0 +1,2 @@
+pool,gex_fastqs,tcr_fastqs,n_donors,hla_csv
+CellBench,test/data/CellBench,,3,test/config/hla.csv

@@ -9,8 +9,13 @@ per cell:
     Patient_02,A*11:01,A*11:01,B*15:01,B*40:01,,
 
 - A homozygous gene has the same allele in both columns.
-- An empty cell (or NA) means the allele is unknown.
-- "A*02:01", "02:01", "HLA-A*02:01" and "A*02:01:01" are all accepted.
+- An empty cell (or NA) means the allele is unknown. A donor with no alleles at
+  all (not typed) is allowed.
+- "A*02:01", "02:01", "HLA-A*02:01" and "A*02:01:01" are all accepted, and so is
+  low-resolution typing: "A*02", "A2" or just "2" in an A column.
+- Gene columns can be named A_1/A_2 or A1/A2.
+- An optional "pool" column says which pool each donor is in, so one table can
+  serve several pools.
 - Comma, semicolon and tab separated files are accepted.
 
 The older one-column-per-gene layout (A_alleles = "A*02:01 | A*24:02") is
@@ -28,13 +33,18 @@ from xml.etree import ElementTree
 PREFERRED_GENE_ORDER = ["A", "B", "C", "DRB1", "DRB2", "DRB3", "DRB4", "DRB5",
                         "DQA1", "DQB1", "DPA1", "DPB1"]
 DONOR_COLUMN_NAMES = {"donor", "donor_id", "patient", "patient_id"}
+POOL_COLUMN_NAMES = {"pool"}
 MISSING_VALUES = {"", "na", "nan", "none", "-", "?"}
 
 KNOWN_GENES = set(PREFERRED_GENE_ORDER) | {"E", "F", "G"}
 
-TWO_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)_(?P<copy>[12])$")
+TWO_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)[_.\- ](?P<copy>[12])$")
 ONE_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)_ALLELES$")
 ALLELE_PATTERN = re.compile(r"^[A-Z0-9]+\*\d{2,4}(?::\d{2,4}){0,3}[A-Z]?$")
+# Column names that were not understood but look like an HLA column (a typo such as A3).
+LOOKS_LIKE_HLA = re.compile(
+    r"^(?:HLA[-_ ]?)?(?:A|B|C|E|F|G|DRB\d?|DQA\d?|DQB\d?|DPA\d?|DPB\d?)[-_. ]?\d{0,2}(?:_?ALLELES?)?$"
+)
 
 
 class HLATableError(ValueError):
@@ -42,12 +52,25 @@ class HLATableError(ValueError):
 
 
 class HLATable:
-    def __init__(self, path, genes, donors, ignored_columns):
+    def __init__(self, path, genes, donors, ignored_columns, pools=None):
         self.path = str(path)
         self.genes = genes
         # donor name -> {gene: [allele_1, allele_2]} ("" when unknown)
         self.donors = donors
         self.ignored_columns = ignored_columns
+        # donor name -> pool, when the table has a pool column ("" = any pool)
+        self.pools = pools or {}
+
+    @property
+    def suspicious_columns(self):
+        """Ignored columns whose name looks like a mistyped HLA column."""
+        return [name for name in self.ignored_columns if LOOKS_LIKE_HLA.match(name.upper())]
+
+    def donors_in_pool(self, pool):
+        """Donors of this pool: all of them when the table has no pool column."""
+        if not self.pools:
+            return list(self.donors)
+        return [donor for donor in self.donors if self.pools.get(donor, "") in ("", pool)]
 
 
 def detect_delimiter(header_line):
@@ -140,6 +163,11 @@ def normalize_allele(gene, value):
     if text.startswith("HLA-"):
         text = text[4:]
     if "*" not in text:
+        # "A2" or "Cw7" (serological style) -> "2", "7"
+        for prefix in [gene, "CW"] if gene == "C" else [gene]:
+            if text.startswith(prefix) and text[len(prefix):][:1].isdigit():
+                text = text[len(prefix):]
+                break
         text = f"{gene}*{text}"
 
     allele_gene, fields = text.split("*", 1)
@@ -186,22 +214,29 @@ def read_hla_table(path):
             f"{path}: needs a 'donor' column (found columns: {', '.join(fieldnames)})"
         )
 
+    pool_column = next(
+        (name for name in fieldnames if name.lower() in POOL_COLUMN_NAMES), None
+    )
+
     two_column = {}  # gene -> {"1": column, "2": column}
     one_column = {}  # gene -> column
     ignored_columns = []
     for name in fieldnames:
-        if name == donor_column:
+        if name in (donor_column, pool_column):
             continue
         key = name.upper()
         match = TWO_COLUMN.match(key)
         if match:
             two_column.setdefault(match.group("gene"), {})[match.group("copy")] = name
             continue
+        plain = key[4:] if key.startswith("HLA-") else key
+        if plain not in KNOWN_GENES and plain[:-1] in KNOWN_GENES and plain[-1] in "12":
+            two_column.setdefault(plain[:-1], {})[plain[-1]] = name  # A1, A2, DRB11
+            continue
         match = ONE_COLUMN.match(key)
         if match and key != "ALL_ALLELES":
             one_column[match.group("gene")] = name
             continue
-        plain = key[4:] if key.startswith("HLA-") else key
         if plain in KNOWN_GENES:  # column "A" holding "A*02:01, A*24:02"
             one_column[plain] = name
             continue
@@ -224,14 +259,13 @@ def read_hla_table(path):
         problems.append("the table has no donor rows")
 
     donors = {}
+    pools = {}
     for line_number, row in enumerate(rows, start=2):
         donor = row.get(donor_column, "")
         if not donor:
             problems.append(f"line {line_number}: the donor name is empty")
             continue
-        if donor in donors:
-            problems.append(f"line {line_number}: donor {donor!r} appears more than once")
-            continue
+        pool = row.get(pool_column, "") if pool_column else ""
 
         profile = {}
         for gene in genes:
@@ -256,14 +290,24 @@ def read_hla_table(path):
                     problems.append(f"line {line_number} ({donor}): {error}")
                     alleles.append("")
             profile[gene] = alleles
+
+        if donor in donors:
+            # the same row twice is harmless; different values are a mistake
+            if donors[donor] != profile or pools.get(donor, "") != pool:
+                problems.append(
+                    f"line {line_number}: donor {donor!r} appears more than once, "
+                    "with different values"
+                )
+            continue
         donors[donor] = profile
+        pools[donor] = pool
 
     if problems:
         raise HLATableError(
             f"{path}:\n" + "\n".join(f"  - {problem}" for problem in problems)
         )
 
-    return HLATable(path, genes, donors, ignored_columns)
+    return HLATable(path, genes, donors, ignored_columns, pools if pool_column else None)
 
 
 def hla_columns(genes):

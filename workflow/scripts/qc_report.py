@@ -9,12 +9,18 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import chemistry
+
 
 # Below these, the result is still written but flagged for a closer look.
 MIN_CELLS_PER_DONOR = 200
 MAX_DOUBLET_FRACTION = 0.30
 MAX_UNASSIGNED_FRACTION = 0.10
 MIN_HLA_READS = 1000
+# Read-based matching: fit of the named patient's typing, and how much lower the
+# best other naming fits (see build_donor_assignments.py).
+MIN_GOOD_READ_FIT = 0.95
+MIN_GOOD_MARGIN = 0.05
 
 SEQUENTIAL = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",
               "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
@@ -66,10 +72,19 @@ def cellranger_metrics(pool_dir):
     return metrics
 
 
+# match_status values for which the cluster was given the patient's name.
+NAMED_STATUSES = {"matched", "matched_by_elimination", "manual"}
+
+
 def load_pool(results_dir, pool, n_expected, matching_genes):
     pool_dir = Path(results_dir) / pool
     manifest = read_csv(pool_dir / "demultiplexed" / "manifest.tsv", delimiter="\t")
     scores = read_csv(pool_dir / "reports" / "donor_match_scores.csv")
+    by_reads = any(row.get("read_fit") for row in scores)
+    evidence_path = pool_dir / "reports" / "hla_read_evidence.csv"
+    evidence = {
+        (row["cluster_donor"], row["gene"]): row for row in read_csv(evidence_path)
+    } if evidence_path.exists() else {}
 
     calls = {"doublet": 0, "unassigned": 0}
     with (pool_dir / "demultiplexed" / "cell_to_donor.csv").open(newline="") as handle:
@@ -80,10 +95,11 @@ def load_pool(results_dir, pool, n_expected, matching_genes):
     donors = []
     for row in manifest:
         genes_json = pool_dir / "arcasHLA" / "genotype" / f"{row['cluster_donor']}_filtered.genes.json"
-        hla_reads = {}
-        if genes_json.exists():
+        # 0 reads = no HLA call for this gene (e.g. arcasHLA failed on this cluster)
+        hla_reads = {gene: 0 for gene in matching_genes}
+        if genes_json.exists() and genes_json.stat().st_size:
             data = json.loads(genes_json.read_text())
-            hla_reads = {gene: int(data[gene][0]) for gene in matching_genes if gene in data}
+            hla_reads.update({gene: int(data[gene][0]) for gene in matching_genes if gene in data})
         donors.append(
             {
                 "label": row["donor"],
@@ -94,6 +110,12 @@ def load_pool(results_dir, pool, n_expected, matching_genes):
                 "n_tcr_cells": to_int(row["n_tcr_cells"]),
                 "hla_reads": hla_reads,
                 "alleles": {gene: (row.get(f"{gene}_1", ""), row.get(f"{gene}_2", "")) for gene in matching_genes},
+                "read_fit": row.get("read_fit", ""),
+                "margin": row.get("naming_margin", ""),
+                "support": {
+                    gene: evidence.get((row["cluster_donor"], gene), {}).get("allele_support_pct", "")
+                    for gene in matching_genes
+                },
             }
         )
     donors.sort(key=lambda donor: int(donor["cluster"]) if donor["cluster"].isdigit() else 0)
@@ -104,8 +126,10 @@ def load_pool(results_dir, pool, n_expected, matching_genes):
         "donors": donors,
         "calls": calls,
         "scores": scores,
+        "by_reads": by_reads,
         "has_tcr": any(donor["n_tcr_cells"] is not None for donor in donors),
         "metrics": cellranger_metrics(pool_dir),
+        "chemistry": chemistry.gene_expression_chemistry(pool_dir / "cellranger" / "outs"),
         "pool_dir": pool_dir,
     }
 
@@ -116,6 +140,14 @@ def pool_checks(data, matching_genes):
     singlets = sum(donor["n_cells"] for donor in donors)
     total = singlets + calls["doublet"] + calls["unassigned"]
     checks = []
+
+    if data["chemistry"]:
+        five_prime = chemistry.is_five_prime(data["chemistry"])
+        checks.append((
+            five_prime,
+            f"Cell Ranger chemistry: {data['chemistry']}"
+            + (" (HLA reads cover the variable exons)" if five_prime else f". {chemistry.THREE_PRIME_NOTE}"),
+        ))
 
     n_found = len(donors)
     checks.append((
@@ -155,13 +187,29 @@ def pool_checks(data, matching_genes):
     if not data["scores"]:
         checks.append((None, "no HLA table given: patients keep the names donor0, donor1, ..."))
     else:
-        matched = [donor for donor in donors if donor["status"] == "matched"]
-        not_matched = [f"{donor['label']} ({donor['status']})" for donor in donors if donor["status"] != "matched"]
+        matched = [donor for donor in donors if donor["status"] in NAMED_STATUSES]
+        not_matched = [f"{donor['label']} ({donor['status']})" for donor in donors if donor["status"] not in NAMED_STATUSES]
+        by_other_means = [
+            f"{donor['label']} ({donor['status'].replace('_', ' ')})"
+            for donor in matched if donor["status"] != "matched"
+        ]
         checks.append((
             not not_matched,
-            f"all {len(donors)} patients matched to the HLA table"
-            if not not_matched else f"{len(matched)} of {len(donors)} matched; not matched: {', '.join(not_matched)}",
+            (f"all {len(donors)} patients named from the HLA table"
+             if not not_matched else f"{len(matched)} of {len(donors)} named; not named: {', '.join(not_matched)}")
+            + (f" ({'; '.join(by_other_means)})" if by_other_means else ""),
         ))
+        if data["by_reads"]:
+            fits = [float(donor["read_fit"]) for donor in matched if donor["read_fit"]]
+            margins = [float(donor["margin"]) for donor in matched if donor["margin"]]
+            if fits:
+                checks.append((
+                    min(fits) >= MIN_GOOD_READ_FIT and (not margins or min(margins) >= MIN_GOOD_MARGIN),
+                    f"HLA typing of the named patients fits their cluster's reads: lowest fit "
+                    f"{min(fits):.3f} (1 = as well as the best HLA type)"
+                    + (f"; any other naming fits at least {min(margins):.3f} worse" if margins else "")
+                    + f" (flagged below {MIN_GOOD_READ_FIT} or {MIN_GOOD_MARGIN})",
+                ))
         table_donors = sorted({row["reference_donor"] for row in data["scores"]})
         unused = [name for name in table_donors if name not in {donor["label"] for donor in matched}]
         if unused and len(table_donors) > data["n_expected"]:
@@ -202,11 +250,26 @@ def bar_chart(rows, value_format):
     return "".join(parts)
 
 
+def heatmap_cell(score, by_reads):
+    """(fraction for the colour, text, tooltip detail, has anything to compare)."""
+    if by_reads:
+        if not score["read_fit"]:
+            return 0, "no typing", "no HLA typing to compare", False
+        fit = float(score["read_fit"])
+        # 0.75 or less = lightest, 1.0 = darkest: wrong patients often still fit 0.8
+        return (max(0.0, min(1.0, (fit - 0.75) / 0.25)), f"{fit:.2f}",
+                f"read fit {fit:.3f} ({score['read_fit_by_gene']})", True)
+    shared, compared = int(score["exact_allele_matches"]), int(score["compared_alleles"])
+    return (shared / compared if compared else 0, f"{shared}/{compared}",
+            f"{shared} of {compared} alleles shared"
+            + (f" ({score['matched_alleles']})" if score["matched_alleles"] else ""), shared > 0)
+
+
 def heatmap(data):
-    """Clusters (rows) x patients of the HLA table (columns): shared / compared alleles."""
+    """Clusters (rows) x patients of the HLA table (columns): read fit, or shared / compared alleles."""
     references = sorted({row["reference_donor"] for row in data["scores"]})
     by_pair = {(row["cluster_donor"], row["reference_donor"]): row for row in data["scores"]}
-    assigned = {f"donor{donor['cluster']}": donor["label"] for donor in data["donors"] if donor["status"] == "matched"}
+    assigned = {f"donor{donor['cluster']}": donor["label"] for donor in data["donors"] if donor["status"] in NAMED_STATUSES}
 
     label_width, cell_w, cell_h, head = 190, 96, 40, 34
     width = label_width + cell_w * len(references) + 4
@@ -227,16 +290,14 @@ def heatmap(data):
             score = by_pair.get((cluster, reference))
             if not score:
                 continue
-            shared, compared = int(score["exact_allele_matches"]), int(score["compared_alleles"])
-            fraction = shared / compared if compared else 0
-            fill = SEQUENTIAL[round(fraction * (len(SEQUENTIAL) - 1))] if shared else "var(--empty-cell)"
+            fraction, text, detail, filled = heatmap_cell(score, data["by_reads"])
+            fill = SEQUENTIAL[round(fraction * (len(SEQUENTIAL) - 1))] if filled else "var(--empty-cell)"
             # ink follows the fill, not the theme (light-blue cells are light in both modes)
-            ink = "#ffffff" if fraction > 0.55 else ("#0b0b0b" if shared else "var(--text-primary)")
+            ink = "#ffffff" if fraction > 0.55 else ("#0b0b0b" if filled else "var(--text-primary)")
             is_assigned = assigned.get(cluster) == reference
             x = label_width + col * cell_w
             tooltip = (
-                f"cluster {donor['cluster']} vs {reference}: {shared} of {compared} alleles shared"
-                + (f" ({score['matched_alleles']})" if score["matched_alleles"] else "")
+                f"cluster {donor['cluster']} vs {reference}: {detail}"
                 + (" - assigned" if is_assigned else "")
             )
             parts.append(
@@ -244,7 +305,7 @@ def heatmap(data):
                 f'<rect x="{x + 1}" y="{y + 1}" width="{cell_w - 2}" height="{cell_h - 2}" rx="3" fill="{fill}"'
                 + (' class="assigned"' if is_assigned else "")
                 + f'/><text x="{x + cell_w / 2}" y="{y + cell_h / 2 + 5}" text-anchor="middle" fill="{ink}" class="cell">'
-                f'{"✓ " if is_assigned else ""}{shared}/{compared}</text></g>'
+                f'{"✓ " if is_assigned else ""}{esc(text)}</text></g>'
             )
     parts.append("</svg>")
     return "".join(parts)
@@ -253,6 +314,18 @@ def heatmap(data):
 # --------------------------------------------------------------------------
 # Page
 # --------------------------------------------------------------------------
+
+def metric_text(value):
+    """Cell Ranger 10 writes fractions (0.976) and plain numbers (15565); older versions 97.6% and 15,565."""
+    text = str(value).strip()
+    try:
+        number = float(text.replace(",", ""))
+    except ValueError:
+        return text
+    if "." in text and 0 <= number <= 1:
+        return f"{100 * number:.1f}%"
+    return f"{number:,.0f}"
+
 
 def status_badge(ok):
     if ok is None:
@@ -291,7 +364,7 @@ def pool_section(data, matching_genes):
             ("Productive TRA+TRB pair", metrics.get(("VDJ T", "Cells with productive V-J spanning pair"))),
         ]
         out.append('<div class="tiles">' + "".join(
-            f'<div class="tile"><div class="tile-value">{esc(value)}</div><div class="tile-label">{esc(label)}</div></div>'
+            f'<div class="tile"><div class="tile-value">{esc(metric_text(value))}</div><div class="tile-label">{esc(label)}</div></div>'
             for label, value in items if value
         ) + "</div>")
         out.append(f'<p class="muted small">Full Cell Ranger report: {esc(data["pool_dir"] / "cellranger" / "outs" / "per_sample_outs")}/*/web_summary.html</p>')
@@ -314,11 +387,16 @@ def pool_section(data, matching_genes):
 
     # 2. HLA matching
     if data["scores"]:
-        matched = sum(1 for donor in donors if donor["status"] == "matched")
+        matched = sum(1 for donor in donors if donor["status"] in NAMED_STATUSES)
         out.append(
-            f'<figure><h3>{matched} of {len(donors)} clusters matched a patient of the HLA table</h3>'
-            f'<p class="sub">Each cell: HLA alleles shared between a souporcell cluster and a patient, out of those compared '
-            f'({", ".join(matching_genes)}, two-field). Darker = more shared. ✓ = the patient the cluster was named after.</p>'
+            f'<figure><h3>{matched} of {len(donors)} clusters named after a patient of the HLA table</h3>'
+            + (f'<p class="sub">Each cell: how well a patient\'s HLA typing explains a souporcell cluster\'s HLA reads '
+               f'({", ".join(matching_genes)}; mean over genes). 1.00 = as well as the best possible HLA type; '
+               f'a wrong patient typically scores below 0.9. Darker = better fit. '
+               if data["by_reads"] else
+               f'<p class="sub">Each cell: HLA alleles shared between a souporcell cluster and a patient, out of those compared '
+               f'({", ".join(matching_genes)}, at the resolution of the HLA table). Darker = more shared. ')
+            + f'✓ = the patient the cluster was named after; a patient without HLA typing can only be named by elimination.</p>'
             + heatmap(data) + "</figure>"
         )
 
@@ -340,11 +418,23 @@ def pool_section(data, matching_genes):
         )
 
     # 4. HLA calls table
+    by_reads = data["by_reads"]
     head = "".join(f"<th>HLA-{esc(gene)}</th>" for gene in matching_genes)
+    if by_reads:
+        head = '<th class="num">Fit</th><th class="num">Margin</th>' + head
     reads_head = "".join(f'<th class="num">{esc(gene)} reads</th>' for gene in matching_genes)
     body = []
     for donor in donors:
-        cells = "".join(f"<td>{esc(' / '.join(a for a in donor['alleles'][gene] if a))}</td>" for gene in matching_genes)
+        cells = "".join(
+            f"<td>{esc(' / '.join(a for a in donor['alleles'][gene] if a))}"
+            + (f'<br><span class="muted small">support {esc(" · ".join(item.split()[-1] for item in donor["support"][gene].split(" | ")))}</span>'
+               if by_reads and donor["support"].get(gene) else "")
+            + "</td>"
+            for gene in matching_genes
+        )
+        if by_reads:
+            cells = (f'<td class="num">{esc(donor["read_fit"] or "–")}</td>'
+                     f'<td class="num">{esc(donor["margin"] or "–")}</td>') + cells
         reads = "".join(
             f'<td class="num">{"⚠ " if donor["hla_reads"].get(gene, 0) < MIN_HLA_READS else ""}{donor["hla_reads"].get(gene, 0):,}</td>'
             for gene in matching_genes
@@ -355,8 +445,13 @@ def pool_section(data, matching_genes):
         )
     out.append(
         '<figure><h3>HLA alleles called per patient</h3>'
-        '<p class="sub">arcasHLA calls on each cluster\'s reads, with the number of reads behind each gene. '
-        f'Fewer than {MIN_HLA_READS:,} reads (⚠) makes a call less reliable.</p>'
+        + ('<p class="sub">HLA type from each cluster\'s reads (one field; null alleles left out, as they mislead '
+           'arcasHLA\'s final call). Support (one number per allele) = % of the gene\'s reads lost when that allele '
+           'is swapped for the best other one (small = a similar allele fits almost as well). Fit = how well the named patient\'s typing '
+           'explains the reads (1 = as well as the best HLA type); margin = how much worse the best other naming fits. '
+           if by_reads else
+           '<p class="sub">arcasHLA calls on each cluster\'s reads, with the number of reads behind each gene. ')
+        + f'Fewer than {MIN_HLA_READS:,} reads (⚠) makes a call less reliable.</p>'
         f'<div class="table-wrap"><table><thead><tr><th>Patient</th><th>Cluster</th><th>Match</th>{head}{reads_head}</tr></thead>'
         f'<tbody>{"".join(body)}</tbody></table></div></figure>'
     )
@@ -423,7 +518,7 @@ def main():
         data = load_pool(args.results_dir, pool, int(n_expected), matching_genes)
         section, n_warn, singlets, total = pool_section(data, matching_genes)
         sections.append(section)
-        matched = sum(1 for donor in data["donors"] if donor["status"] == "matched")
+        matched = sum(1 for donor in data["donors"] if donor["status"] in NAMED_STATUSES)
         overview.append(
             f'<tr><td><a href="#{esc(pool)}">{esc(pool)}</a></td>'
             f'<td>{"GEX + TCR" if data["has_tcr"] else "GEX"}</td>'

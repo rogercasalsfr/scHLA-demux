@@ -13,6 +13,8 @@ DONOR_COLUMNS = [
     "n_tcr_cells",
     "cluster_donor",
     "best_reference_donor",
+    "read_fit",
+    "naming_margin",
     "exact_allele_matches",
     "compared_alleles",
     "matched_alleles",

@@ -73,6 +73,11 @@ def main():
         genotype_data.append((json_file, data))
         all_genes.update(data.keys())
 
+    if not all_genes:
+        raise SystemExit(
+            f"arcasHLA made no HLA call for any cluster in {input_dir}: see the "
+            "donor*_arcashla_extract.log and donor*_arcashla_genotype.log files in the pool's logs/ folder"
+        )
     genes = ordered_genes(all_genes)
     donors = {}
 
