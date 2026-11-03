@@ -27,7 +27,7 @@ FASTQs (GEX [+ TCR])
    ▼  publish                  one folder per patient + cell_to_donor.csv
 ```
 
-**Use 10x 5' gene expression data** (e.g. 5' Immune Profiling, with or without TCR). HLA alleles differ mostly in exons 2 and 3, near the 5' end of the genes, which 5' libraries read (84-92% of the HLA-A reads in our 5' pools). 3' libraries read the other end, where the alleles hardly differ (under 1% of the reads cover exons 1-3): souporcell still splits the patients, but most clusters cannot be named from the HLA table. The pipeline reads the chemistry from Cell Ranger and warns about 3' data.
+**Use 10x 5' gene expression data** (e.g. 5' Immune Profiling, with or without TCR). HLA alleles differ mostly in exons 2 and 3, near the 5' end of the genes, which 5' libraries read: 87-92% of the HLA-A reads cover exons 1-3 in two public 10x 5' pools (Jurkat + MM.1S, and the 10x 5' hashing example). 3' libraries read the other end, where the alleles hardly differ: 0.5% of the HLA-A reads cover exons 1-3 in the 3' test data below. Souporcell still splits the patients, but most clusters cannot be named from the HLA table. The pipeline reads the chemistry from Cell Ranger and warns about 3' data.
 
 Souporcell finds the patients from the SNPs in the RNA reads, but it only calls them `0, 1, 2, ...`. arcasHLA then aligns the HLA reads of each cluster to every known HLA allele, and the matching step checks, for each patient of your HLA table, how well their typing explains each cluster's reads, to put the real patient name on each cluster. Without an HLA table, everything still runs, and the patients keep the names `donor0`, `donor1`, ...
 
@@ -117,6 +117,9 @@ See [The donor HLA table](#the-donor-hla-table). `config/hla_example.csv` is a t
 
 # run everything (one SLURM job on a whole node)
 sbatch run_slurm.sh
+
+# no SLURM: run it directly on the machine (uses all its CPUs; start it in tmux or screen)
+./run_slurm.sh
 ```
 
 Logs are written to `logs/scHLA-demux_<jobid>.out` and `.err`. Before anything starts, the pipeline checks the sample sheet, the FASTQ folders, the HLA tables and the tool paths. Any problems are listed together in the `.err` log, so you can fix them all at once.
@@ -252,7 +255,7 @@ In `cell_to_donor.csv`, the `donor` column holds the patient name for singlets, 
 
 ### `match_status`: how sure is the patient label?
 
-Each cluster is scored against each patient by the **read fit**: the share of the cluster's HLA reads explained by the best allele pair the patient's typing allows, divided by the share explained by the best allele pair overall, averaged over the matching genes. `1.000` means the typing explains the reads as well as any HLA type can; a patient whose typing is wrong at one allele drops clearly (in our data, wrong patients scored 0.88 or less).
+Each cluster is scored against each patient by the **read fit**: the share of the cluster's HLA reads explained by the best allele pair the patient's typing allows, divided by the share explained by the best allele pair overall, averaged over the matching genes. `1.000` means the typing explains the reads as well as any HLA type can; a patient whose typing misses one of the cluster's alleles drops clearly (in the public Jurkat + MM.1S mixture, each cell line's typing fits its own cluster at 0.995-1.000 and the other cluster at 0.32-0.33). A typed allele with no reads costs nothing, so a person who carries the cluster's alleles plus another one can fit as well as the true patient: the naming then comes out `ambiguous`, not wrong.
 
 Clusters are then named one-to-one: each patient names at most one cluster, and the pipeline picks the naming with the best total fit over the whole pool. So two clusters can never get the same patient, and a cluster that only resembles a patient (shares a common allele such as `A*02`) does not take the name of a patient that another cluster fits better. A cluster is only named after a patient whose fit is at least `matching.min_read_fit` (0.90).
 
@@ -318,7 +321,7 @@ sbatch run_slurm.sh --until run_souporcell      # stop after souporcell: check c
 sbatch run_slurm.sh                             # continue to the end
 ```
 
-To redo a single step, delete its output (or use `--forcerun <step>`) and submit again. The steps are, in order: `link_fastqs`, `make_multi_csv`, `cellranger_multi`, `run_souporcell`, `make_donor_barcodes`, `filter_donor_bam`, `extract_donor_fastq`, `genotype_donor`, `summarize_genotypes`, `build_donor_assignments`, `publish_demultiplexed`, `summarize_pools`, `qc_report`.
+To redo a single step, delete its output (or use `--forcerun <step>`) and submit again. The steps are, in order: `link_fastqs`, `make_multi_csv`, `cellranger_multi`, `run_souporcell`, `make_donor_barcodes`, `filter_donor_bam`, `extract_donor_fastq`, `genotype_donor`, `summarize_genotypes`, `hla_read_evidence`, `build_donor_assignments`, `publish_demultiplexed`, `summarize_pools`, `qc_report`.
 
 ### When a step fails
 
@@ -361,10 +364,10 @@ Tool paths and settings live in `config/config.yaml`. The tool paths point to wh
 `setup.sh` installs everything (see [Installation](#installation)). The machine needs:
 
 - `curl`, `conda` (or `mamba`) and `apptainer` (or `singularity`)
-- SLURM to use `run_slurm.sh`
+- SLURM for `sbatch run_slurm.sh`, or any Linux machine to run `./run_slurm.sh` directly
 - about 50 GB for `resources/`, plus 50-100 GB per pool for the results
 
-The helper scripts only use the Python standard library.
+The helper scripts only use the Python standard library, except `hla_read_evidence.py` (numpy), which runs in the arcasHLA env that `setup.sh` installs.
 
 ## Repository layout
 
