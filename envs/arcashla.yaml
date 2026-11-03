@@ -10,5 +10,5 @@ dependencies:
   - python=3.10
   - arcas-hla=0.6.0=hdfd78af_2
   - kallisto=0.44.0
-  - samtools
+  - samtools=1.21
   - git-lfs

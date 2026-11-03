@@ -1,7 +1,8 @@
 # Snakemake, which runs the pipeline. Installed by setup.sh into resources/envs/snakemake.
+# Pinned to the version the pipeline is tested with.
 channels:
   - conda-forge
   - bioconda
 dependencies:
   - python>=3.11
-  - snakemake-minimal>=8
+  - snakemake-minimal=9.27.1

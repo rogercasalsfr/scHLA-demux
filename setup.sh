@@ -27,6 +27,10 @@ SOUPORCELL_IMAGES=(
   "library://wheaton5/souporcell/souporcell:release"
 )
 SYLABS_LIBRARY="https://library.sylabs.io"
+# IPD-IMGT/HLA release used by arcasHLA: 3.66.0 (tag v3.66.0-alpha), the release the
+# pipeline is tested with. HLA allele names and sequences change between releases.
+IMGT_RELEASE="3.66.0"
+IMGT_COMMIT="d972ae287948dc2e5468a40ff3b3d27227541189"
 SUBSET_BAM_URL="https://github.com/10XGenomics/subset-bam/releases/download/v1.1.0/subset-bam_linux"
 CELLRANGER_PAGE="https://www.10xgenomics.com/support/software/cell-ranger/downloads"
 
@@ -242,7 +246,8 @@ install_snakemake() { install_env snakemake; }
 
 check_arcashla() {
   local bin="${RES}/envs/arcashla/bin"
-  env_ready arcashla && [ -f "${RES}/envs/arcashla/.schla_hla_reference" ] \
+  env_ready arcashla \
+    && [ "$(cat "${RES}/envs/arcashla/.schla_hla_reference" 2>/dev/null)" = "${IMGT_COMMIT}" ] \
     && [ -x "${bin}/arcasHLA" ] && "${bin}/samtools" --version >/dev/null 2>&1 \
     && grep -qw pseudo <<< "$("${bin}/kallisto" 2>&1)"
 }
@@ -251,20 +256,28 @@ install_arcashla() {
   local prefix="${RES}/envs/arcashla" bin="${RES}/envs/arcashla/bin" imgt
   install_env arcashla
   imgt=$(newest "${prefix}"/share/arcas-hla-*/dat)/IMGTHLA
-  log "downloading the IMGT/HLA database for arcasHLA"
-  # IMGT/HLA now ships hla.dat zipped, which arcasHLA 0.6.0 does not expect: let
-  # arcasHLA clone the database, unzip hla.dat, then build arcasHLA's reference.
+  log "downloading the IMGT/HLA database (release ${IMGT_RELEASE}) for arcasHLA"
+  # arcasHLA clones the IMGT/HLA repository (its own build of the latest release can
+  # fail, see below), then the tested release is checked out. IMGT/HLA now ships
+  # hla.dat zipped, which arcasHLA 0.6.0 does not expect: unzip it, then build
+  # arcasHLA's reference from it.
   PATH="${bin}:${PATH}" "${bin}/arcasHLA" reference --update || true
+  if [ ! -d "${imgt}/.git" ]; then
+    echo "The IMGT/HLA download failed: no git clone in ${imgt}" >&2
+    return 1
+  fi
+  rm -f "${imgt}/hla.dat"
+  PATH="${bin}:${PATH}" git -C "${imgt}" checkout -q -f "${IMGT_COMMIT}"
   if [ ! -f "${imgt}/hla.dat" ]; then
     if [ ! -f "${imgt}/hla.dat.zip" ]; then
-      echo "The IMGT/HLA download failed: no hla.dat or hla.dat.zip in ${imgt}" >&2
+      echo "The IMGT/HLA release ${IMGT_RELEASE} has no hla.dat or hla.dat.zip in ${imgt}" >&2
       return 1
     fi
     "${bin}/python" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("hla.dat", sys.argv[2])' \
       "${imgt}/hla.dat.zip" "${imgt}"
-    PATH="${bin}:${PATH}" "${bin}/arcasHLA" reference --rebuild
   fi
-  touch "${prefix}/.schla_hla_reference"
+  PATH="${bin}:${PATH}" "${bin}/arcasHLA" reference --rebuild
+  echo "${IMGT_COMMIT}" > "${prefix}/.schla_hla_reference"
 }
 
 # --------------------------------------------------------------------------

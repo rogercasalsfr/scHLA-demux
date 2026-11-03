@@ -53,15 +53,18 @@ The link expires after about a day and is tied to your 10x account, so never sav
 
 What `setup.sh` installs:
 
-| Tool | From |
-|---|---|
-| Cell Ranger | 10x Genomics (needs the link above) |
-| GEX reference `refdata-gex-GRCh38-2024-A` | 10x Genomics |
-| V(D)J reference `refdata-cellranger-vdj-GRCh38-alts-ensembl-7.1.0` | 10x Genomics |
-| souporcell image | Sylabs library (`wheaton5/souporcell`) |
-| `subset-bam` | 10x Genomics GitHub release |
-| Snakemake | conda env `resources/envs/snakemake` (`envs/snakemake.yaml`) |
-| arcasHLA, samtools and the IMGT/HLA database | conda env `resources/envs/arcashla` (`envs/arcashla.yaml`) |
+| Tool | Version | From |
+|---|---|---|
+| Cell Ranger | the one you download (tested: 10.1.0) | 10x Genomics (needs the link above) |
+| GEX reference | `refdata-gex-GRCh38-2024-A` | 10x Genomics |
+| V(D)J reference | `refdata-cellranger-vdj-GRCh38-alts-ensembl-7.1.0` | 10x Genomics |
+| souporcell | 2.5 | Docker image `cumulusprod/souporcell:2.5` (if that fails, the Sylabs library image `wheaton5/souporcell`) |
+| `subset-bam` | 1.1.0 | 10x Genomics GitHub release |
+| Snakemake | 9.27.1 | conda env `resources/envs/snakemake` (`envs/snakemake.yaml`) |
+| arcasHLA, kallisto, samtools | 0.6.0, 0.44.0, 1.21 | conda env `resources/envs/arcashla` (`envs/arcashla.yaml`) |
+| IMGT/HLA database | release 3.66.0 | the IMGT/HLA GitHub repository, fixed to that release |
+
+Every version except Cell Ranger's is fixed in `setup.sh` and `envs/`, so a new installation gets the same tools and HLA database that the pipeline was tested with. Cell Ranger is the release you download from 10x; the pipeline reads the output layouts of Cell Ranger 7 to 10 and was tested with 10.1.0.
 
 `setup.sh` needs `curl`, `conda` (or `mamba`) and `apptainer` (or `singularity`). It can be run again at any time: finished parts are skipped, and an interrupted download or unpack is redone. `./setup.sh --check` only reports what is installed.
 
