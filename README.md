@@ -35,21 +35,22 @@ Why not use arcasHLA's final call directly? On 10x data it can go wrong: in its 
 
 ## Installation
 
-Download the repo and run `setup.sh` once. It installs every tool and reference into `resources/` (about 50 GB), and `config/config.yaml` already points there:
+Three commands. `setup.sh` installs every tool and reference into `resources/` (about 50 GB, about an hour), and `config/config.yaml` already points there:
 
 ```bash
 git clone https://github.com/rogercasalsfr/scHLA-demux.git
 cd scHLA-demux
-./setup.sh --cellranger-url "<link from the 10x download page>"
+./setup.sh
 ```
 
-Cell Ranger is free, but 10x only gives the download link after you accept their license:
+You need a Linux machine (Cell Ranger runs only on Linux) with `curl`, `git` and `apptainer` (or `singularity`; ask your system administrator if it is missing). conda is used if you have it; if not, `setup.sh` first installs its own copy (Miniforge) into `resources/`, with no admin rights needed.
+
+**Cell Ranger is the one part you fetch yourself**: it is free, but 10x gives the download link only after you accept their license. `setup.sh` asks for it at the start:
 
 1. Open the [Cell Ranger download page](https://www.10xgenomics.com/support/software/cell-ranger/downloads) and fill in the form.
-2. The page shows a `curl` command. Copy only the link in it (it starts with `https://cf.10xgenomics.com/releases/` and ends with `Signature=...`).
-3. Pass it to `setup.sh` **inside double quotes**. The link contains `&`, and without quotes the shell cuts it there and 10x answers with a small error file instead of Cell Ranger.
+2. The page shows a `curl` command. Copy it, paste it when `setup.sh` asks (the whole command or just the link), and leave `setup.sh` running.
 
-The link expires after about a day and is tied to your 10x account, so never save it in a file of the repo. If you already downloaded `cellranger-<version>.tar.gz` (or `.tar.xz`), put it in `resources/` and run `./setup.sh` without the link.
+The link expires after about a day and is tied to your 10x account, so never save it in a file of the repo. If you already have `cellranger-<version>.tar.gz` (or `.tar.xz`), put it in `resources/` before running `./setup.sh`. To give the link without the question (e.g. in a script): `./setup.sh --cellranger-url "<link>"`, keeping the double quotes (the link contains `&`).
 
 What `setup.sh` installs:
 
@@ -66,7 +67,7 @@ What `setup.sh` installs:
 
 Every version except Cell Ranger's is fixed in `setup.sh` and `envs/`, so a new installation gets the same tools and HLA database that the pipeline was tested with. Cell Ranger is the release you download from 10x; the pipeline reads the output layouts of Cell Ranger 7 to 10 and was tested with 10.1.0.
 
-`setup.sh` needs `curl`, `conda` (or `mamba`) and `apptainer` (or `singularity`). It can be run again at any time: finished parts are skipped, and an interrupted download or unpack is redone. `./setup.sh --check` only reports what is installed.
+`setup.sh` can be run again at any time: finished parts are skipped, and an interrupted download or unpack is redone. `./setup.sh --check` only reports what is installed.
 
 ### Test your installation
 
@@ -80,6 +81,7 @@ The test data is the CellBench mixture of three lung cancer cell lines from thre
 
 - souporcell finds the 3 cell lines: each cluster holds one line (≥ 95% of its cells), and at least 95% of the cells are in the cluster of their published line;
 - the pipeline reports the 3' chemistry;
+- every souporcell cluster gets a naming result (a name, `unmatched` or `ambiguous`);
 - no cluster is named after the wrong cell line (with 3' data some stay unnamed, which is expected);
 - with one cell line's HLA typing removed, still no cluster gets a wrong name.
 
@@ -366,7 +368,7 @@ Tool paths and settings live in `config/config.yaml`. The tool paths point to wh
 
 `setup.sh` installs everything (see [Installation](#installation)). The machine needs:
 
-- `curl`, `conda` (or `mamba`) and `apptainer` (or `singularity`)
+- `curl`, `git` and `apptainer` (or `singularity`); conda is optional (`setup.sh` installs Miniforge without it)
 - SLURM for `sbatch run_slurm.sh`, or any Linux machine to run `./run_slurm.sh` directly
 - about 50 GB for `resources/`, plus 50-100 GB per pool for the results
 

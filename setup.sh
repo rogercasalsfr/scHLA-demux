@@ -3,13 +3,15 @@
 # Installs everything scHLA-demux needs into resources/. Run it once after
 # downloading the repo, from any folder:
 #
-#   ./setup.sh --cellranger-url "<link from the 10x download page>"
-#   ./setup.sh             # run again at any time: finished parts are skipped
+#   ./setup.sh             # asks for the Cell Ranger download link, installs the rest
+#   ./setup.sh --cellranger-url "<link>"   # the same, without the question
 #   ./setup.sh --check     # only report what is installed
 #
-# Everything is public except Cell Ranger, which 10x only gives out after you
-# accept their license (see cellranger_help below). config/config.yaml already
-# points to resources/, so nothing needs editing afterwards.
+# Run it again at any time: finished parts are skipped. Everything is public
+# except Cell Ranger, which 10x only gives out after you accept their license
+# (setup.sh explains how). Without conda, Miniforge is installed into
+# resources/ first. config/config.yaml already points to resources/, so nothing
+# needs editing afterwards.
 
 set -euo pipefail
 
@@ -38,7 +40,7 @@ CELLRANGER_URL="${CELLRANGER_URL:-}"
 CHECK_ONLY=false
 
 usage() {
-  sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -94,14 +96,32 @@ Cell Ranger needs a download link from 10x Genomics (free, but you have to
 accept their license first):
   1. Open ${CELLRANGER_PAGE}
   2. Fill in the form. The page then shows a curl command.
-  3. Copy the link from it (https://cf.10xgenomics.com/releases/...Signature=...)
-     and run:
-       ./setup.sh --cellranger-url "<the link>"
-     Keep the double quotes: the link contains '&'.
+  3. Run ./setup.sh again and paste that command (or just the link in it) when
+     it asks. Or give the link on the command line, inside double quotes (the
+     link contains '&'): ./setup.sh --cellranger-url "<the link>"
 The link expires after about a day and is personal: never put it in a file of
 the repo. If you already downloaded cellranger-<version>.tar.gz or .tar.xz,
 move it into resources/ and run ./setup.sh again.
 EOF
+}
+
+ask_cellranger_url() {  # in a terminal: ask for the link, accepting the whole curl command
+  local answer
+  [ -t 0 ] || return 0
+  cat <<EOF
+
+Cell Ranger is free, but 10x Genomics gives the download link only after you
+accept their license:
+  1. Open ${CELLRANGER_PAGE}
+  2. Fill in the form. The page then shows a curl command.
+Paste that command (or just the link in it) here and press Enter. Press Enter
+alone to install everything else now and Cell Ranger later.
+EOF
+  read -r -p "> " answer || true
+  CELLRANGER_URL=$(grep -o "https://cf\.10xgenomics\.com/releases/[^\"' ]*" <<< "${answer}" | head -n 1 || true)
+  if [ -n "${answer}" ] && [ -z "${CELLRANGER_URL}" ]; then
+    echo "That does not contain a Cell Ranger link (https://cf.10xgenomics.com/releases/...)." >&2
+  fi
 }
 
 check_cellranger() {
@@ -113,6 +133,9 @@ install_cellranger() {
   exe=$(newest "${RES}"/cellranger-*/cellranger)
   if [ -z "${exe}" ]; then
     archive=$(newest "${RES}"/cellranger-*.tar.*)
+    if [ -z "${archive}" ] && [ -z "${CELLRANGER_URL}" ]; then
+      ask_cellranger_url
+    fi
     if [ -z "${archive}" ] && [ -n "${CELLRANGER_URL}" ]; then
       archive="${RES}/$(basename "${CELLRANGER_URL%%\?*}")"
       case "$(basename "${archive}")" in
@@ -218,7 +241,22 @@ install_subset_bam() {
 # conda envs: snakemake, and arcasHLA + samtools
 # --------------------------------------------------------------------------
 
+MINIFORGE_URL="https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
 CONDA=$(command -v mamba || command -v conda || true)
+if [ -z "${CONDA}" ] && [ -x "${RES}/miniforge/bin/mamba" ]; then
+  CONDA="${RES}/miniforge/bin/mamba"
+fi
+
+install_miniforge() {  # no conda on this machine: conda-forge's Miniforge into resources/miniforge
+  if [ ! -x "${RES}/miniforge/bin/mamba" ]; then
+    log "conda not found: installing Miniforge into resources/miniforge (no admin rights needed)"
+    download "${MINIFORGE_URL}" "${RES}/miniforge_installer.sh"
+    rm -rf "${RES}/miniforge"
+    bash "${RES}/miniforge_installer.sh" -b -p "${RES}/miniforge"
+    rm -f "${RES}/miniforge_installer.sh"
+  fi
+  CONDA="${RES}/miniforge/bin/mamba"
+}
 
 env_ready() {  # name: installed from the current envs/<name>.yaml
   [ "$(cat "${RES}/envs/$1/.schla_ready" 2>/dev/null)" = "$(md5sum < "${REPO_DIR}/envs/$1.yaml")" ]
@@ -227,13 +265,12 @@ env_ready() {  # name: installed from the current envs/<name>.yaml
 install_env() {  # name (envs/<name>.yaml -> resources/envs/<name>)
   local prefix="${RES}/envs/$1"
   env_ready "$1" && return 0
-  if [ -z "${CONDA}" ]; then
-    echo "conda is not installed; install Miniforge (https://conda-forge.org/download) and run setup again" >&2
-    return 1
-  fi
+  [ -n "${CONDA}" ] || install_miniforge
   rm -rf "${prefix}"
   log "creating the $1 conda env (a few minutes)"
-  "${CONDA}" env create -p "${prefix}" -f "${REPO_DIR}/envs/$1.yaml"
+  # no "Confirm changes [Y/n]" question from mamba in the middle of the setup
+  CONDA_ALWAYS_YES=true MAMBA_ALWAYS_YES=true \
+    "${CONDA}" env create -p "${prefix}" -f "${REPO_DIR}/envs/$1.yaml"
   md5sum < "${REPO_DIR}/envs/$1.yaml" > "${prefix}/.schla_ready"
 }
 
@@ -293,6 +330,23 @@ STEPS=(
 )
 
 mkdir -p "${RES}"
+
+# What the machine must already have; setup.sh installs everything else.
+if ! ${CHECK_ONLY}; then
+  missing=()
+  for tool in curl git tar; do
+    command -v "${tool}" >/dev/null || missing+=("${tool}")
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "Please install ${missing[*]} first (or ask your system administrator), then run ./setup.sh again." >&2
+    exit 1
+  fi
+fi
+if [ -z "${APPTAINER}" ]; then
+  echo "Note: apptainer (or singularity) is not installed. souporcell runs in it, so ask your system" >&2
+  echo "administrator to install it; setup.sh installs everything else now." >&2
+fi
+
 failed=()
 summary=()
 for step in "${STEPS[@]}"; do
