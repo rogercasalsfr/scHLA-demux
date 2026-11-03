@@ -482,6 +482,18 @@ def load_samples(path):
                         f"{where}: HLA table column '{column}' looks like an HLA column but is "
                         "not understood (expected names like A_1, A_2 or A1, A2) and is ignored"
                     )
+                if table.group_alleles:
+                    shown = list(table.group_alleles.items())[:8]
+                    more = len(table.group_alleles) - len(shown)
+                    message = (
+                        f"{sample['hla_csv']}: {len(table.group_alleles)} alleles are P or G "
+                        "groups; the HLA reference has no group names, so the P/G is dropped and "
+                        "each is used as the allele that names the group: "
+                        + ", ".join(f"{group} -> {allele}" for group, allele in shown)
+                        + (f" and {more} more" if more > 0 else "")
+                    )
+                    if message not in warnings:  # once per table, not per pool
+                        warnings.append(message)
 
         if sample["manual_assignments"] and not os.path.isfile(sample["manual_assignments"]):
             problems.append(

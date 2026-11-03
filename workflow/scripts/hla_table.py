@@ -41,6 +41,9 @@ KNOWN_GENES = set(PREFERRED_GENE_ORDER) | {"E", "F", "G"}
 TWO_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)[_.\- ](?P<copy>[12])$")
 ONE_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)_ALLELES$")
 ALLELE_PATTERN = re.compile(r"^[A-Z0-9]+\*\d{2,4}(?::\d{2,4}){0,3}[A-Z]?$")
+# P and G groups (B*39:01P, A*02:01:01G) name a group of alleles after its first allele.
+# The HLA reference has no group names, so the letter is dropped.
+GROUP_SUFFIX = re.compile(r"(?<=\d)[PG]$")
 # Column names that were not understood but look like an HLA column (a typo such as A3).
 LOOKS_LIKE_HLA = re.compile(
     r"^(?:HLA[-_ ]?)?(?:A|B|C|E|F|G|DRB\d?|DQA\d?|DQB\d?|DPA\d?|DPB\d?)[-_. ]?\d{0,2}(?:_?ALLELES?)?$"
@@ -52,7 +55,7 @@ class HLATableError(ValueError):
 
 
 class HLATable:
-    def __init__(self, path, genes, donors, ignored_columns, pools=None):
+    def __init__(self, path, genes, donors, ignored_columns, pools=None, group_alleles=None):
         self.path = str(path)
         self.genes = genes
         # donor name -> {gene: [allele_1, allele_2]} ("" when unknown)
@@ -60,6 +63,8 @@ class HLATable:
         self.ignored_columns = ignored_columns
         # donor name -> pool, when the table has a pool column ("" = any pool)
         self.pools = pools or {}
+        # P/G group as written -> allele used ("B*39:01P" -> "B*39:01")
+        self.group_alleles = group_alleles or {}
 
     @property
     def suspicious_columns(self):
@@ -175,6 +180,7 @@ def normalize_allele(gene, value):
         raise HLATableError(
             f"{value!r} is in a {gene} column but is an allele of {allele_gene}"
         )
+    fields = GROUP_SUFFIX.sub("", fields)
 
     # "2:1" -> "02:01" (spreadsheets often drop leading zeros)
     fields = ":".join(
@@ -260,6 +266,7 @@ def read_hla_table(path):
 
     donors = {}
     pools = {}
+    group_alleles = {}
     for line_number, row in enumerate(rows, start=2):
         donor = row.get(donor_column, "")
         if not donor:
@@ -285,10 +292,14 @@ def read_hla_table(path):
             alleles = []
             for value in values:
                 try:
-                    alleles.append(normalize_allele(gene, value))
+                    allele = normalize_allele(gene, value)
                 except HLATableError as error:
                     problems.append(f"line {line_number} ({donor}): {error}")
-                    alleles.append("")
+                    allele = ""
+                group = GROUP_SUFFIX.search(str(value or "").strip().upper())
+                if allele and group:
+                    group_alleles[allele + group.group()] = allele
+                alleles.append(allele)
             profile[gene] = alleles
 
         if donor in donors:
@@ -307,7 +318,8 @@ def read_hla_table(path):
             f"{path}:\n" + "\n".join(f"  - {problem}" for problem in problems)
         )
 
-    return HLATable(path, genes, donors, ignored_columns, pools if pool_column else None)
+    return HLATable(path, genes, donors, ignored_columns, pools if pool_column else None,
+                    group_alleles)
 
 
 def hla_columns(genes):

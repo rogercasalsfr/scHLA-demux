@@ -172,6 +172,7 @@ Rules:
 - **Unknown**: leave the cell empty (or write `NA`). That allele is just not compared.
 - **Patients without HLA typing**: keep them in the table with empty HLA cells. If all the other patients of the pool are found, the cluster left over is named after them (`matched_by_elimination`).
 - **Allele spelling**: `A*02:01`, `A*02:01:01`, `HLA-A*02:01` and `02:01` are all accepted.
+- **P and G groups** (`B*39:01P`, `A*02:01:01G`, as many HLA labs report): the HLA reference has no group names, so the P or G is dropped and the group is used as the allele that names it (`B*39:01`, `A*02:01:01`). The pipeline lists these conversions at the start of the run.
 - **Low-resolution typing works**: `A*03`, `A3`, or just `3` in an A column (also `Cw7` for C). Each allele is used at the resolution it has: `A*03` in the table allows any `A*03` allele, `A*03:01` only `A*03:01` alleles (the table is used at two fields at most). A gene with only one allele typed leaves the other one free.
 - **`pool` column** (optional): which pool each patient is in. With it, one table can hold the patients of every pool: each pool is only matched against its own patients, and `n_donors` can be left empty.
 - **Other columns** (age, diagnosis, notes...) are allowed and ignored, so a patient sheet with clinical data works as is. The pipeline only warns about a column that looks like a mistyped HLA column, such as `A3`.
