@@ -932,9 +932,12 @@ checkpoint cellranger_multi:
         done=CELLRANGER_DONE
     threads:
         CELLRANGER_THREADS
+    resources:
+        # A resource, not a param: the memory free at launch changes between runs, and
+        # a changed param would make Snakemake redo Cell Ranger and every step after it.
+        localmem_gb=CELLRANGER_MEM_GB
     params:
         cellranger=CELLRANGER,
-        localmem=CELLRANGER_MEM_GB,
         run_dir=lambda wildcards: CELLRANGER_RUN_DIR.format(pool=wildcards.pool)
     log:
         os.path.join(POOL_LOG_DIR, "cellranger_multi.log")
@@ -973,7 +976,7 @@ checkpoint cellranger_multi:
           --id="$(basename "{params.run_dir}")" \
           --csv="{input.csv}" \
           --localcores="{threads}" \
-          --localmem="{params.localmem}"
+          --localmem="{resources.localmem_gb}"
 
         if [ -z "$(sample_bam)" ]; then
           echo "Cell Ranger finished but no sample_alignments.bam was found in {params.run_dir}/outs/per_sample_outs/" >&2
@@ -1207,7 +1210,7 @@ rule hla_read_evidence:
         python=ARCASHLA_PYTHON,
         reference_json=ARCASHLA_REFERENCE_JSON,
         genotype_dir=lambda wildcards: GENOTYPE_DIR.format(pool=wildcards.pool),
-        clusters=lambda wildcards: ",".join(f"donor{donor}" for donor in get_singlet_donors(wildcards.pool)),
+        souporcell_clusters=lambda wildcards: SOUPORCELL_CLUSTERS.format(pool=wildcards.pool),
         reference=lambda wildcards: SAMPLES[wildcards.pool]["hla_csv"],
         genes=HLA_GENES,
         matching_genes=MATCHING_GENES,
@@ -1224,10 +1227,15 @@ rule hla_read_evidence:
         if [ -n "{params.reference}" ]; then
           reference_arg+=(--reference-csv "{params.reference}")
         fi
+        # The clusters with singlets, read from souporcell's output here rather than given
+        # by Snakemake: when Cell Ranger's step reruns, Snakemake 9 can start this step with
+        # the placeholder "<TBD>" instead of the cluster list.
+        clusters=$(awk -F'\t' 'NR > 1 && $2 == "singlet" {{print $3}}' "{params.souporcell_clusters}" \
+          | sort -n -u | sed 's/^/donor/' | paste -sd, -)
 
         "{params.python}" "{params.script}" \
           --genotype-dir "{params.genotype_dir}" \
-          --clusters "{params.clusters}" \
+          --clusters "$clusters" \
           --reference-json "{params.reference_json}" \
           --genes "{params.genes}" \
           --matching-genes "{params.matching_genes}" \

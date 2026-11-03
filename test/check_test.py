@@ -52,6 +52,8 @@ def check(ok, text, results):
 
 def check_naming(assignments, truth_names, five_prime, results, untyped=None):
     """Named clusters must carry the right name; with 5' data every cluster must be named."""
+    check(set(assignments) == set(truth_names),
+          f"the naming covers the souporcell clusters ({', '.join(sorted(assignments))})", results)
     for cluster, row in sorted(assignments.items()):
         expected = truth_names.get(cluster, "?")
         named = row["match_status"] in NAMED
