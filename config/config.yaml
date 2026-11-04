@@ -28,7 +28,8 @@ cellranger:
 
 souporcell:
   container: resources/souporcell_release.sif
-  # Command used to run the container (apptainer or singularity).
+  # Command used to run the container (apptainer or singularity). Without either on the
+  # computer, the copy that setup.sh installs into resources/ is used.
   apptainer: apptainer
   # Leave empty to use <gex_reference>/fasta/genome.fa.
   reference_fasta: ""

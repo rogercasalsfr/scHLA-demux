@@ -3,6 +3,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import sys
 
 from snakemake.exceptions import WorkflowError
@@ -179,7 +180,20 @@ CELLRANGER_MEM_GB = (
     else positive_int(cfg("cellranger.localmem_gb"), "cellranger.localmem_gb")
 )
 
-APPTAINER = str(cfg_or_default("souporcell.apptainer", "apptainer"))
+
+def find_apptainer(command):
+    """The container command: as set in config.yaml, else singularity, else the copy setup.sh
+    installs into resources/ on a computer without apptainer."""
+    if os.path.sep in command:
+        return resolve_path(command)
+    for name in (command, "singularity"):
+        if shutil.which(name):
+            return name
+    installed = os.path.join(REPO_ROOT, "resources", "envs", "apptainer", "bin", "apptainer")
+    return installed if os.path.isfile(installed) else command
+
+
+APPTAINER = find_apptainer(str(cfg_or_default("souporcell.apptainer", "apptainer")))
 SOUPORCELL_CONTAINER = resolve_path(cfg("souporcell.container"))
 SOUPORCELL_FASTA = resolve_optional_path(
     cfg_or_default("souporcell.reference_fasta", None)
@@ -555,11 +569,45 @@ def check_tools(samples):
     for label, path, exists in needed:
         if not exists(path):
             problems.append(f"config.yaml {label}: not found: {path}")
+    if not shutil.which(APPTAINER):
+        problems.append(f"config.yaml souporcell.apptainer: '{APPTAINER}' not found "
+                        "(apptainer runs souporcell; ./setup.sh installs it when it is missing)")
     return problems
+
+
+# Cell Ranger's minimum for the human genome (10x system requirements): 8 cores, 64 GB of memory.
+MIN_CPUS, MIN_MEM_GB = 8, 64
+# Disk per pool: 45-50 GB of results for 10-20k cells, more while souporcell writes its temporary files.
+DISK_PER_POOL_GB = 100
+
+
+def check_machine(samples):
+    """Warnings (the run still starts) when this computer, or this SLURM job, is smaller than the run needs."""
+    where = "in this SLURM job" if os.environ.get("SLURM_JOB_ID") else "free on this computer"
+    warnings = []
+    cpus, mem_gb = machine_cpus(), machine_mem_gb()
+    if mem_gb < MIN_MEM_GB:
+        warnings.append(f"{mem_gb} GB of memory {where}: Cell Ranger needs at least {MIN_MEM_GB} GB for "
+                        "the human genome (10x recommends 128 GB) and may stop for lack of memory")
+    if cpus < MIN_CPUS:
+        warnings.append(f"{cpus} CPUs: Cell Ranger asks for at least {MIN_CPUS} (16 recommended); "
+                        "the run will work but take much longer")
+    to_run = [pool for pool in samples if not os.path.isfile(
+        os.path.join(RESULTS_ROOT, pool, "demultiplexed", "cell_to_donor.csv"))]
+    folder = RESULTS_ROOT
+    while not os.path.isdir(folder):
+        folder = os.path.dirname(folder)
+    free_gb = shutil.disk_usage(folder).free // 1024**3
+    if to_run and free_gb < DISK_PER_POOL_GB * len(to_run):
+        warnings.append(f"{free_gb} GB free on the disk of {RESULTS_ROOT} for {len(to_run)} pool(s) to run: "
+                        f"plan about {DISK_PER_POOL_GB} GB per pool (45-50 GB of results for 10-20k cells, "
+                        "more while souporcell runs)")
+    return warnings
 
 
 SAMPLES, _problems, _warnings = load_samples(SAMPLES_CSV)
 _problems += check_tools(SAMPLES)
+_warnings += check_machine(SAMPLES)
 
 for _warning in _warnings:
     print(f"[warning] {_warning}", file=sys.stderr)
@@ -611,6 +659,7 @@ def record_run_info():
         "gex_reference": os.path.realpath(GEX_REFERENCE),
         "vdj_reference": os.path.realpath(VDJ_REFERENCE) if VDJ_REFERENCE else "",
         "souporcell_container": os.path.realpath(SOUPORCELL_CONTAINER),
+        "apptainer": f"{shutil.which(APPTAINER)} ({command_output([APPTAINER, '--version'])})",
         "arcasHLA": ", ".join(os.path.basename(path) for path in glob.glob(
             os.path.join(os.path.dirname(ARCASHLA_ENV_BIN), "share", "arcas-hla-*"))),
         "IMGT/HLA": command_output(["grep", "^# version", imgt[0]]).lstrip("# ") if imgt else "unknown",

@@ -43,7 +43,7 @@ cd scHLA-demux
 ./setup.sh
 ```
 
-You need a Linux machine (Cell Ranger runs only on Linux) with `curl`, `git` and `apptainer` (or `singularity`; ask your system administrator if it is missing). conda is used if you have it; if not, `setup.sh` first installs its own copy (Miniforge) into `resources/`, with no admin rights needed.
+It works on a SLURM cluster and on a single Linux computer (Cell Ranger runs only on Linux). You need `curl`, `git` and `tar`. conda and `apptainer` (or `singularity`) are used if you have them; if not, `setup.sh` installs its own copies into `resources/`, with no admin rights needed. The computer (or cluster node) needs at least 8 CPUs and 64 GB of memory, Cell Ranger's minimum for the human genome (16 CPUs and 128 GB recommended): see [Requirements](#requirements).
 
 **Cell Ranger is the one part you fetch yourself**: it is free, but 10x gives the download link only after you accept their license. `setup.sh` asks for it at the start:
 
@@ -76,6 +76,8 @@ One command runs the whole pipeline on a small public dataset and checks the res
 ```bash
 ./test/run_test.sh      # about 8 GB download, then 2-4 hours; run it in tmux/screen or with nohup
 ```
+
+With SLURM it runs as a SLURM job; without it (or with `SCHLA_NO_SLURM=1`), on this computer.
 
 The test data is the CellBench mixture of three lung cancer cell lines from three people (NCI-H1975, NCI-H2228, HCC827) in one 10x 3' v2 library, about 900 cells ([Tian et al. 2019](https://doi.org/10.1038/s41592-019-0425-8), GEO GSE111108). Their HLA types come from [Cellosaurus](https://www.cellosaurus.org), and the authors published which cell line each cell barcode comes from. Being 3' data, it tests the whole pipeline and the clustering, but cannot test the naming fully (see [How it works](#how-it-works)). The test passes when:
 
@@ -117,17 +119,19 @@ See [The donor HLA table](#the-donor-hla-table). `config/hla_example.csv` is a t
 ### 3. Check, then run
 
 ```bash
-# check every input and show what will run (takes seconds, no SLURM job)
-./run_slurm.sh --dry-run
+# check every input and show what will run (takes seconds)
+./run.sh --dry-run
 
-# run everything (one SLURM job on a whole node)
-sbatch run_slurm.sh
+# on your computer: run everything (uses all its CPUs; add --cores 8 to use fewer)
+./run.sh
 
-# no SLURM: run it directly on the machine (uses all its CPUs; start it in tmux or screen)
-./run_slurm.sh
+# on a SLURM cluster: run everything as one job on a whole node
+sbatch run.sh
 ```
 
-Logs are written to `logs/scHLA-demux_<jobid>.out` and `.err`. Before anything starts, the pipeline checks the sample sheet, the FASTQ folders, the HLA tables and the tool paths. Any problems are listed together in the `.err` log, so you can fix them all at once.
+On a computer, the run stops when its terminal closes: start it inside `tmux` or `screen`, or with `nohup ./run.sh > /dev/null 2>&1 &`. A stopped run continues where it left off when started again.
+
+Logs are written to `logs/scHLA-demux_<date_time>.log` on a computer, and `logs/scHLA-demux_<jobid>.out` and `.err` under SLURM. Before anything starts, the pipeline checks the sample sheet, the FASTQ folders, the HLA tables and the tool paths. Any problems are listed together in the log, so you can fix them all at once. It also warns when the computer (or the SLURM job) has less memory, CPUs or free disk than the run needs.
 
 Results are written to `results/<pool>/`. Open `results/qc_report.html` first (see [Checking that everything ran well](#checking-that-everything-ran-well)). Then go to `results/<pool>/demultiplexed/`.
 
@@ -151,7 +155,7 @@ Notes:
 
 - The pipeline writes the Cell Ranger multi CSV for you (`results/<pool>/cellranger_multi.csv`) and finds the FASTQ sample name from the file names.
 - `n_donors` is the number souporcell looks for. Put the real number of patients in the pool, even if some are missing from your HLA table.
-- Several pools in one sheet run in the same SLURM job, one after the other or side by side, as the cores allow.
+- Several pools in one sheet run in the same run, one after the other or side by side, as the cores allow.
 
 ### FASTQ names
 
@@ -309,30 +313,33 @@ adata.obs["donor"] = cells["donor"].reindex(adata.obs_names).values
 
 ## Running, re-running and resuming
 
-- **Resuming**: if the job stops (time limit, node failure), submit `sbatch run_slurm.sh` again. Finished steps are not redone.
-- **Adding a pool**: add a row to `samples.csv` and submit again. Only the new pool runs.
-- **Changing the HLA table**: edit it and submit again. Only the matching and publishing steps rerun.
-- **Changing `n_donors`**: delete `results/<pool>/souporcell` and everything after it (`arcasHLA`, `reports`, `demultiplexed`), then submit again.
+In this section, "run again" means `./run.sh` on a computer or `sbatch run.sh` on a SLURM cluster.
+
+- **Resuming**: if the run stops (computer restarted, time limit, node failure), run again. Finished steps are not redone.
+- **Adding a pool**: add a row to `samples.csv` and run again. Only the new pool runs.
+- **Changing the HLA table**: edit it and run again. Only the matching and publishing steps rerun.
+- **Changing `n_donors`**: delete `results/<pool>/souporcell` and everything after it (`arcasHLA`, `reports`, `demultiplexed`), then run again.
 - **Re-running Cell Ranger**: an existing Cell Ranger output in `results/<pool>/cellranger` is always reused. Delete that folder to run it again (e.g. after changing the FASTQs).
-- **Other config file**: `sbatch run_slurm.sh --configfile config/other.yaml`. Any extra arguments are passed to Snakemake.
+- **Other config file**: `./run.sh --configfile config/other.yaml` (or `sbatch run.sh --configfile ...`). Any extra arguments are passed to Snakemake.
 
 ### Running one stage at a time
 
 Every step keeps its output (nothing is deleted at the end), so you can stop after any stage, look at the results, and continue later from there:
 
 ```bash
-sbatch run_slurm.sh --until cellranger_multi    # stop after Cell Ranger: check web_summary.html
-sbatch run_slurm.sh --until run_souporcell      # stop after souporcell: check clusters.tsv
-sbatch run_slurm.sh                             # continue to the end
+./run.sh --until cellranger_multi    # stop after Cell Ranger: check web_summary.html
+./run.sh --until run_souporcell      # stop after souporcell: check clusters.tsv
+./run.sh                             # continue to the end
+# (the same with sbatch run.sh ... on a SLURM cluster)
 ```
 
-To redo a single step, delete its output (or use `--forcerun <step>`) and submit again. The steps are, in order: `link_fastqs`, `make_multi_csv`, `cellranger_multi`, `run_souporcell`, `make_donor_barcodes`, `filter_donor_bam`, `extract_donor_fastq`, `genotype_donor`, `summarize_genotypes`, `hla_read_evidence`, `build_donor_assignments`, `publish_demultiplexed`, `summarize_pools`, `qc_report`.
+To redo a single step, delete its output (or use `--forcerun <step>`) and run again. The steps are, in order: `link_fastqs`, `make_multi_csv`, `cellranger_multi`, `run_souporcell`, `make_donor_barcodes`, `filter_donor_bam`, `extract_donor_fastq`, `genotype_donor`, `summarize_genotypes`, `hla_read_evidence`, `build_donor_assignments`, `publish_demultiplexed`, `summarize_pools`, `qc_report`.
 
 ### When a step fails
 
-- Every step writes its own log to `results/<pool>/logs/<step>.log` (per cluster for the HLA steps, e.g. `donor2_arcashla_genotype.log`). The logs are kept when a step fails, and the SLURM `.err` log names the step and its log file.
+- Every step writes its own log to `results/<pool>/logs/<step>.log` (per cluster for the HLA steps, e.g. `donor2_arcashla_genotype.log`). The logs are kept when a step fails, and the run's log in `logs/` names the step and its log file.
 - The other pool keeps running (`--keep-going`), so one broken pool does not stop the rest.
-- Fix the problem and submit again: finished steps are kept, and the failed one restarts. Cell Ranger also continues its own run where it stopped.
+- Fix the problem and run again: finished steps are kept, and the failed one restarts. Cell Ranger also continues its own run where it stopped.
 
 ## Configuration
 
@@ -345,6 +352,7 @@ Tool paths and settings live in `config/config.yaml`. The tool paths point to wh
 | `cellranger.executable`, `gex_reference`, `vdj_reference` | Cell Ranger and its references (`vdj_reference` is only needed for TCR pools) |
 | `cellranger.threads`, `localmem_gb` | Resources for Cell Ranger. `auto` (default) uses every CPU of the job and 90% of its memory |
 | `souporcell.container` | Souporcell Apptainer/Singularity image |
+| `souporcell.apptainer` | Command that runs it: `apptainer` (default), else `singularity`, else the copy `setup.sh` installed |
 | `souporcell.reference_fasta` | Genome FASTA. Empty = `<gex_reference>/fasta/genome.fa` |
 | `arcashla.env_bin` | `bin/` folder of the conda env with `arcasHLA` and `samtools` |
 | `arcashla.subset_bam` | 10x `subset-bam` executable |
@@ -354,23 +362,25 @@ Tool paths and settings live in `config/config.yaml`. The tool paths point to wh
 | `matching.two_field_resolution` | Use the table at two-field resolution at most (default `true`) |
 | `matching.min_read_fit`, `min_margin` | Lowest read fit for naming a cluster (default `0.90`), and the margin below which a naming is `ambiguous` (default `0.03`) |
 
-`run_slurm.sh` asks SLURM for a whole node (all CPUs and memory) for up to 7 days. To change that, add `sbatch` options, which override the ones in the script: `sbatch --partition=highmem --time=2-00:00:00 run_slurm.sh`. The Snakemake used is set there too, or with `SNAKEMAKE=/path/to/snakemake sbatch run_slurm.sh`.
+On a computer, `./run.sh` uses all its CPUs (`--cores 8` for fewer) and lets Cell Ranger use 90% of the free memory (`cellranger.localmem_gb` to set it). Under SLURM, `run.sh` asks for a whole node (all CPUs and memory) for up to 7 days. To change that, add `sbatch` options, which override the ones in the script: `sbatch --partition=highmem --time=2-00:00:00 run.sh`. The Snakemake used is set there too, or with `SNAKEMAKE=/path/to/snakemake ./run.sh`.
 
 ## Troubleshooting
 
 - **"Please fix these problems before running scHLA-demux"**: the list under it says which line of which file is wrong.
 - **"holds FASTQs of several samples"**: put the folder plus the file name start in `gex_fastqs` (e.g. `/data/Pool1_GEX` for `/data/Pool1_GEX_R1.fastq.gz`), or add a `gex_fastq_id` (or `tcr_fastq_id`) column with that name.
-- **A run was killed** (out of memory, node reboot, time limit): submit again. Cell Ranger's leftover lock is removed automatically and it resumes where it stopped.
+- **A run was killed** (out of memory, reboot, time limit): run again. Cell Ranger's leftover lock is removed automatically and it resumes where it stopped.
 - **Most clusters are `unmatched`**: first check the chemistry line of the QC report: with 3' data this is expected (name the clusters with `manual_assignments` if you know them from other data). Otherwise check that the HLA table belongs to this pool. Then compare `cluster_hla_from_reads.csv` with your table, and look at `read_fit_by_gene` in `donor_match_scores.csv` to see which gene disagrees: a typing error in the table shows up as one gene with a low fit. Low-coverage clusters (few HLA reads, e.g. 3' data) give less certain calls.
 - **`ambiguous`**: the tied patients share alleles at the compared genes. Adding more genes (e.g. `DRB1`) to the table and to `matching.genes` can separate them.
 
 ## Requirements
 
-`setup.sh` installs everything (see [Installation](#installation)). The machine needs:
+`setup.sh` installs everything (see [Installation](#installation)). It runs on a SLURM cluster (`sbatch run.sh`) or on any single Linux computer (`./run.sh`), which needs:
 
-- `curl`, `git` and `apptainer` (or `singularity`); conda is optional (`setup.sh` installs Miniforge without it)
-- SLURM for `sbatch run_slurm.sh`, or any Linux machine to run `./run_slurm.sh` directly
-- about 50 GB for `resources/`, plus 50-100 GB per pool for the results
+- `curl`, `git` and `tar`. conda and `apptainer` (or `singularity`) are optional: without them, `setup.sh` installs Miniforge and apptainer into `resources/`, no admin rights needed. (On Ubuntu 23.10 and later, apptainer without admin rights may be blocked; then an administrator has to install apptainer.)
+- at least 8 CPUs and 64 GB of memory: [Cell Ranger's minimum](https://www.10xgenomics.com/support/software/cell-ranger/downloads/cr-system-requirements) for the human genome (16 CPUs and 128 GB recommended). With fewer CPUs it works but takes longer; with less memory Cell Ranger may stop.
+- disk: about 50 GB for `resources/`, plus about 100 GB per pool (45-50 GB of results for 10-20k cells, more while souporcell runs).
+
+The run warns at the start when the computer or SLURM job is below these numbers.
 
 The helper scripts only use the Python standard library, except `hla_read_evidence.py` (numpy), which runs in the arcasHLA env that `setup.sh` installs.
 
@@ -379,7 +389,8 @@ The helper scripts only use the Python standard library, except `hla_read_eviden
 ```text
 scHLA-demux/
 ├── setup.sh                      installs the tools and references into resources/
-├── run_slurm.sh                  SLURM launcher
+├── run.sh                        runs the pipeline: ./run.sh on a computer, sbatch run.sh on SLURM
+├── run_slurm.sh                  old name of run.sh (a link to it)
 ├── LICENSE                       MIT
 ├── envs/                         conda envs installed by setup.sh
 ├── test/                         ./test/run_test.sh: full run on public data, checked against the ground truth

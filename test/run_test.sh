@@ -25,14 +25,14 @@ PYTHON="${REPO_DIR}/resources/envs/snakemake/bin/python"
 ./test/download_test_data.sh
 
 echo "Checking the inputs..."
-./run_slurm.sh --configfile "${CONFIG}" --dry-run --quiet > /dev/null
+./run.sh --configfile "${CONFIG}" --dry-run --quiet > /dev/null
 
 if command -v sbatch > /dev/null && [ -z "${SCHLA_NO_SLURM:-}" ]; then
   echo "Running scHLA-demux on the test data as a SLURM job (logs in logs/)..."
-  sbatch --wait run_slurm.sh --configfile "${CONFIG}"
+  sbatch --wait run.sh --configfile "${CONFIG}"
 else
   echo "Running scHLA-demux on the test data on this machine..."
-  ./run_slurm.sh --configfile "${CONFIG}"
+  ./run.sh --configfile "${CONFIG}"
 fi
 
 "${PYTHON}" test/check_test.py

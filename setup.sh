@@ -9,9 +9,11 @@
 #
 # Run it again at any time: finished parts are skipped. Everything is public
 # except Cell Ranger, which 10x only gives out after you accept their license
-# (setup.sh explains how). Without conda, Miniforge is installed into
-# resources/ first. config/config.yaml already points to resources/, so nothing
-# needs editing afterwards.
+# (setup.sh explains how). Works on a cluster and on a single Linux computer:
+# without conda, Miniforge is installed into resources/ first, and without
+# apptainer (or singularity), apptainer is installed there too, with no admin
+# rights. config/config.yaml already points to resources/, so nothing needs
+# editing afterwards.
 
 set -euo pipefail
 
@@ -40,7 +42,7 @@ CELLRANGER_URL="${CELLRANGER_URL:-}"
 CHECK_ONLY=false
 
 usage() {
-  sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -199,8 +201,26 @@ install_vdj() { install_reference "${VDJ_REF}" "${VDJ_URL}" vdj_ok refdata-vdj; 
 # souporcell and subset-bam
 # --------------------------------------------------------------------------
 
-APPTAINER=$(command -v apptainer || command -v singularity || true)
+# apptainer (or singularity) runs the souporcell image. Clusters usually have it; on a computer
+# without it, conda-forge's apptainer goes into resources/envs/apptainer (no admin rights needed).
+find_apptainer() {
+  APPTAINER=$(command -v apptainer || command -v singularity || true)
+  if [ -z "${APPTAINER}" ] && [ -x "${RES}/envs/apptainer/bin/apptainer" ]; then
+    APPTAINER="${RES}/envs/apptainer/bin/apptainer"
+  fi
+}
+find_apptainer
 SOUPORCELL_SIF="${RES}/souporcell_release.sif"
+
+check_apptainer() {  # looks again: the install runs in a subshell
+  find_apptainer
+  [ -n "${APPTAINER}" ] && "${APPTAINER}" --version >/dev/null 2>&1
+}
+
+install_apptainer() {
+  log "apptainer (or singularity) not found: installing apptainer into resources/envs/apptainer"
+  install_env apptainer
+}
 
 check_souporcell() {
   [ -n "${APPTAINER}" ] && [ -s "${SOUPORCELL_SIF}" ] \
@@ -209,7 +229,7 @@ check_souporcell() {
 
 install_souporcell() {
   if [ -z "${APPTAINER}" ]; then
-    echo "apptainer (or singularity) is not installed; ask your system administrator" >&2
+    echo "apptainer is not available (see the apptainer step above)" >&2
     return 1
   fi
   local tmp="${RES}/.souporcell_download.sif" image
@@ -224,6 +244,11 @@ install_souporcell() {
     log "could not use ${image}"
   done
   rm -f "${tmp}"
+  if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+    echo "This system blocks the user namespaces that apptainer needs without admin rights (Ubuntu 23.10" >&2
+    echo "and later). Ask an administrator to install apptainer system-wide (its package allows it), then" >&2
+    echo "run ./setup.sh again." >&2
+  fi
   return 1
 }
 
@@ -326,6 +351,7 @@ STEPS=(
   "subset_bam|subset-bam"
   "snakemake|Snakemake"
   "arcashla|arcasHLA + samtools + IMGT/HLA database"
+  "apptainer|apptainer (runs the souporcell image)"
   "souporcell|souporcell image"
 )
 
@@ -342,11 +368,6 @@ if ! ${CHECK_ONLY}; then
     exit 1
   fi
 fi
-if [ -z "${APPTAINER}" ]; then
-  echo "Note: apptainer (or singularity) is not installed. souporcell runs in it, so ask your system" >&2
-  echo "administrator to install it; setup.sh installs everything else now." >&2
-fi
-
 failed=()
 summary=()
 for step in "${STEPS[@]}"; do

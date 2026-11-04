@@ -1,0 +1,7 @@
+# apptainer, which runs the souporcell image. setup.sh installs it into resources/envs/apptainer
+# only on a computer that has neither apptainer nor singularity (no admin rights needed).
+# Pinned to the version the pipeline is tested with.
+channels:
+  - conda-forge
+dependencies:
+  - apptainer=1.5.4
