@@ -66,7 +66,10 @@ newest() {  # newest existing path among the arguments, skipping unfinished down
 
 download() {  # url destination
   log "downloading $(basename "$2")"
-  curl -fL --retry 3 -C - -o "$2.part" "$1"
+  # a progress bar only in a terminal: in a log (SLURM, nohup) it writes thousands of characters
+  local progress=(--silent --show-error)
+  [ -t 2 ] && progress=(--progress-bar)
+  curl -fL --retry 3 -C - "${progress[@]}" -o "$2.part" "$1"
   mv "$2.part" "$2"
 }
 

@@ -11,12 +11,13 @@ per cell:
 - A homozygous gene has the same allele in both columns.
 - An empty cell (or NA) means the allele is unknown. A donor with no alleles at
   all (not typed) is allowed.
-- "A*02:01", "02:01", "HLA-A*02:01" and "A*02:01:01" are all accepted, and so is
-  low-resolution typing: "A*02", "A2" or just "2" in an A column.
-- Gene columns can be named A_1/A_2 or A1/A2.
+- "A*02:01", "02:01", "02 : 01", "HLA-A*02:01" and "A*02:01:01" are all accepted, and so
+  is low-resolution typing: "A*02", "A2" or just "2" in an A column.
+- Gene columns can be named A_1/A_2 or A1/A2, with or without "HLA-" or "HLA_" before.
 - An optional "pool" column says which pool each donor is in, so one table can
   serve several pools.
-- Comma, semicolon and tab separated files are accepted.
+- Comma, semicolon and tab separated files are accepted, and Excel workbooks: one sheet
+  of a workbook is given as "typing.xlsx#Sheet1" (see choose_sheet).
 
 The older one-column-per-gene layout (A_alleles = "A*02:01 | A*24:02") is
 still accepted when reading. Tables are always written in the two-column
@@ -32,14 +33,17 @@ from xml.etree import ElementTree
 
 PREFERRED_GENE_ORDER = ["A", "B", "C", "DRB1", "DRB2", "DRB3", "DRB4", "DRB5",
                         "DQA1", "DQB1", "DPA1", "DPB1"]
-DONOR_COLUMN_NAMES = {"donor", "donor_id", "patient", "patient_id"}
+# In order of preference, compared in lower case with spaces and hyphens as "_" ("Patient ID").
+DONOR_COLUMN_NAMES = ["donor", "donor_id", "patient", "patient_id", "participant",
+                      "participant_id", "subject", "subject_id", "sample", "sample_id"]
 POOL_COLUMN_NAMES = {"pool"}
 MISSING_VALUES = {"", "na", "nan", "none", "-", "?"}
 
 KNOWN_GENES = set(PREFERRED_GENE_ORDER) | {"E", "F", "G"}
 
-TWO_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)[_.\- ](?P<copy>[12])$")
-ONE_COLUMN = re.compile(r"^(?:HLA-)?(?P<gene>[A-Z0-9]+)_ALLELES$")
+HLA_PREFIX = re.compile(r"^HLA[-_. ]?(?=[A-Z])")  # HLA-A1, HLA_A_1 -> A1, A_1
+TWO_COLUMN = re.compile(r"^(?P<gene>[A-Z0-9]+)[_.\- ](?P<copy>[12])$")
+ONE_COLUMN = re.compile(r"^(?P<gene>[A-Z0-9]+)_ALLELES$")
 ALLELE_PATTERN = re.compile(r"^[A-Z0-9]+\*\d{2,4}(?::\d{2,4}){0,3}[A-Z]?$")
 # P and G groups (B*39:01P, A*02:01:01G) name a group of alleles after its first allele.
 # The HLA reference has no group names, so the letter is dropped.
@@ -84,54 +88,116 @@ def detect_delimiter(header_line):
     return delimiter if counts[delimiter] else ","
 
 
-def read_xlsx_rows(path):
-    """Read the first sheet of an .xlsx file into (fieldnames, rows), standard library only."""
-    main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-    rel_id = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+XLSX_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+XLSX_REL_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+# Excel's built-in time formats (h:mm, h:mm:ss, [h]:mm:ss, ...).
+XLSX_TIME_FORMATS = {18, 19, 20, 21, 45, 46, 47}
 
+
+def split_sheet(spec):
+    """'typing.xlsx#Pool1' -> ('typing.xlsx', 'Pool1'); anything else -> (spec, None)."""
+    match = re.match(r"^(?P<path>.+\.xlsx)#(?P<sheet>.+)$", str(spec), re.IGNORECASE)
+    if match and not Path(spec).exists():
+        return match.group("path"), match.group("sheet")
+    return str(spec), None
+
+
+def xlsx_sheets(archive):
+    """[(sheet name, its file in the archive)], in the workbook's order."""
+    sheets = ElementTree.fromstring(archive.read("xl/workbook.xml")).iter(f"{XLSX_MAIN}sheet")
+    relations = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    targets = {rel.get("Id"): rel.get("Target").lstrip("/") for rel in relations}
+    found = []
+    for sheet in sheets:
+        target = targets[sheet.get(XLSX_REL_ID)]
+        found.append((sheet.get("name"), target if target.startswith("xl/") else f"xl/{target}"))
+    return found
+
+
+def sheet_names(path):
+    with zipfile.ZipFile(path) as archive:
+        return [name for name, _ in xlsx_sheets(archive)]
+
+
+def xlsx_time_styles(archive):
+    """The cell styles that show a number as a time. Excel turns 02:01 typed in a cell into
+    the time 2:01 (a fraction of a day); such cells are read as the h:mm text Excel shows."""
+    if "xl/styles.xml" not in archive.namelist():
+        return set()
+    styles = ElementTree.fromstring(archive.read("xl/styles.xml"))
+    time_formats = set(XLSX_TIME_FORMATS)
+    for number_format in styles.iter(f"{XLSX_MAIN}numFmt"):
+        code = re.sub(r'"[^"]*"|\[(?![hms]+\])[^\]]*\]', "", number_format.get("formatCode", "").lower())
+        if "h" in code and not re.search(r"[yd]", code):
+            time_formats.add(int(number_format.get("numFmtId")))
+    cell_formats = styles.find(f"{XLSX_MAIN}cellXfs")
+    return {
+        index for index, cell_format in enumerate(cell_formats if cell_formats is not None else [])
+        if int(cell_format.get("numFmtId", 0)) in time_formats
+    }
+
+
+def read_xlsx_rows(path, sheet=None):
+    """Read one sheet (the first by default) of an .xlsx file into (fieldnames, rows),
+    standard library only."""
     with zipfile.ZipFile(path) as archive:
         shared = []
         if "xl/sharedStrings.xml" in archive.namelist():
-            for item in ElementTree.fromstring(archive.read("xl/sharedStrings.xml")).iter(f"{main}si"):
-                shared.append("".join(text.text or "" for text in item.iter(f"{main}t")))
+            for item in ElementTree.fromstring(archive.read("xl/sharedStrings.xml")).iter(f"{XLSX_MAIN}si"):
+                shared.append("".join(text.text or "" for text in item.iter(f"{XLSX_MAIN}t")))
 
-        first_sheet = ElementTree.fromstring(archive.read("xl/workbook.xml")).find(f"{main}sheets/{main}sheet")
-        relations = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-        target = next(rel.get("Target") for rel in relations if rel.get("Id") == first_sheet.get(rel_id))
-        target = target.lstrip("/")
-        sheet = ElementTree.fromstring(archive.read(target if target.startswith("xl/") else f"xl/{target}"))
+        sheets = xlsx_sheets(archive)
+        if sheet is None:
+            sheet, target = sheets[0]
+        else:
+            chosen = [entry for entry in sheets if entry[0] == sheet] or [
+                entry for entry in sheets if entry[0].strip().lower() == sheet.strip().lower()
+            ]
+            if not chosen:
+                raise HLATableError(
+                    f"{path}: no sheet named {sheet!r} (sheets: {', '.join(name for name, _ in sheets)})"
+                )
+            sheet, target = chosen[0]
+        time_styles = xlsx_time_styles(archive)
+        content = ElementTree.fromstring(archive.read(target))
 
         table = []
-        for row in sheet.iter(f"{main}row"):
+        for row in content.iter(f"{XLSX_MAIN}row"):
             values = {}
-            for cell in row.iter(f"{main}c"):
+            for cell in row.iter(f"{XLSX_MAIN}c"):
                 letters = re.match(r"[A-Z]+", cell.get("r", "")).group(0)
                 column = 0
                 for letter in letters:
                     column = column * 26 + ord(letter) - 64
-                kind, value = cell.get("t"), cell.find(f"{main}v")
+                kind, value = cell.get("t"), cell.find(f"{XLSX_MAIN}v")
                 if kind == "s":
                     text = shared[int(value.text)]
                 elif kind == "inlineStr":
-                    text = "".join(t.text or "" for t in cell.iter(f"{main}t"))
+                    text = "".join(t.text or "" for t in cell.iter(f"{XLSX_MAIN}t"))
                 else:
                     text = value.text if value is not None and value.text else ""
+                    if text and kind in (None, "n") and int(cell.get("s", 0)) in time_styles:
+                        seconds = round(float(text) * 86400)
+                        text = f"{seconds // 3600}:{seconds % 3600 // 60:02d}"
+                        text += f":{seconds % 60:02d}" if seconds % 60 else ""
                     text = re.sub(r"^(-?\d+)\.0$", r"\1", text)  # 1234567.0 -> 1234567
                 values[column - 1] = text.strip()
             if any(values.values()):
                 table.append([values.get(index, "") for index in range(max(values) + 1)])
 
     if not table:
-        raise HLATableError(f"{path}: the first sheet is empty")
+        raise HLATableError(f"{path}: sheet {sheet!r} is empty")
     fieldnames = [name.strip() for name in table[0]]
     rows = [dict(zip(fieldnames, values + [""] * (len(fieldnames) - len(values)))) for values in table[1:]]
     return fieldnames, rows
 
 
-def read_table_rows(path):
-    """Read a CSV/TSV (or .xlsx) file into (fieldnames, rows) with stripped values."""
+def read_table_rows(path, sheet=None):
+    """Read a CSV/TSV (or one sheet of an .xlsx) file into (fieldnames, rows) with stripped values."""
     if str(path).lower().endswith(".xlsx"):
-        return read_xlsx_rows(path)
+        return read_xlsx_rows(path, sheet)
+    if sheet is not None:
+        raise HLATableError(f"{path}: only an Excel .xlsx file has sheets (#{sheet})")
 
     with Path(path).open(newline="", encoding="utf-8-sig") as handle:
         header_line = handle.readline()
@@ -142,7 +208,14 @@ def read_table_rows(path):
 
         fieldnames = [name.strip() for name in reader.fieldnames]
         rows = []
-        for raw_row in reader:
+        for line_number, raw_row in enumerate(reader, start=2):
+            # values beyond the header: a value holding the separator (e.g. a;b in a file
+            # separated by ;) that is not in quotes would otherwise be cut silently
+            if any(str(extra).strip() for extra in raw_row.get(None) or []):
+                raise HLATableError(
+                    f"{path} line {line_number}: more values than columns; put a value that "
+                    f"contains the separator {reader.reader.dialect.delimiter!r} in quotes"
+                )
             row = {}
             for name, value in zip(fieldnames, (raw_row.get(key) for key in reader.fieldnames)):
                 row[name] = value.strip() if isinstance(value, str) else ""
@@ -164,9 +237,8 @@ def normalize_allele(gene, value):
     if text.lower() in MISSING_VALUES:
         return ""
 
-    text = text.upper().replace(" ", "")
-    if text.startswith("HLA-"):
-        text = text[4:]
+    text = re.sub(r"\s+", "", text.upper())  # "23 : 01", also non-breaking spaces
+    text = re.sub(r"^HLA[-_]", "", text)
     if "*" not in text:
         # "A2" or "Cw7" (serological style) -> "2", "7"
         for prefix in [gene, "CW"] if gene == "C" else [gene]:
@@ -203,23 +275,11 @@ def split_alleles(value):
     return [item for item in re.split(r"\s*(?:\||;|,|/)\s*", text) if item]
 
 
-def read_hla_table(path):
-    """Read and validate an HLA table. Raises HLATableError listing every problem."""
-    path = Path(path)
-    if not path.is_file():
-        raise HLATableError(f"{path}: file not found")
-
-    fieldnames, rows = read_table_rows(path)
-    problems = []
-
-    donor_column = next(
-        (name for name in fieldnames if name.lower() in DONOR_COLUMN_NAMES), None
-    )
-    if donor_column is None:
-        raise HLATableError(
-            f"{path}: needs a 'donor' column (found columns: {', '.join(fieldnames)})"
-        )
-
+def find_columns(fieldnames):
+    """Sort a table's columns: (donor column, pool column, {gene: {"1": column, "2": column}},
+    {gene: column} for one column per gene, ignored columns)."""
+    simple = {re.sub(r"[\s-]+", "_", name.strip().lower()): name for name in reversed(fieldnames)}
+    donor_column = next((simple[name] for name in DONOR_COLUMN_NAMES if name in simple), None)
     pool_column = next(
         (name for name in fieldnames if name.lower() in POOL_COLUMN_NAMES), None
     )
@@ -230,23 +290,72 @@ def read_hla_table(path):
     for name in fieldnames:
         if name in (donor_column, pool_column):
             continue
-        key = name.upper()
+        key = HLA_PREFIX.sub("", name.upper())
         match = TWO_COLUMN.match(key)
         if match:
             two_column.setdefault(match.group("gene"), {})[match.group("copy")] = name
             continue
-        plain = key[4:] if key.startswith("HLA-") else key
-        if plain not in KNOWN_GENES and plain[:-1] in KNOWN_GENES and plain[-1] in "12":
-            two_column.setdefault(plain[:-1], {})[plain[-1]] = name  # A1, A2, DRB11
+        if key not in KNOWN_GENES and key[:-1] in KNOWN_GENES and key[-1:] in ("1", "2"):
+            two_column.setdefault(key[:-1], {})[key[-1]] = name  # A1, A2, DRB11
             continue
         match = ONE_COLUMN.match(key)
         if match and key != "ALL_ALLELES":
             one_column[match.group("gene")] = name
             continue
-        if plain in KNOWN_GENES:  # column "A" holding "A*02:01, A*24:02"
-            one_column[plain] = name
+        if key in KNOWN_GENES:  # column "A" holding "A*02:01, A*24:02"
+            one_column[key] = name
             continue
         ignored_columns.append(name)
+    return donor_column, pool_column, two_column, one_column, ignored_columns
+
+
+def choose_sheet(path, pool):
+    """The sheet to read for this pool from a workbook with several sheets: the sheet named
+    like the pool, else the only sheet that holds an HLA table. None for a one-sheet workbook
+    or a text file (the whole file is read). Raises HLATableError when it cannot tell."""
+    if not str(path).lower().endswith(".xlsx") or not Path(path).is_file():
+        return None
+    names = sheet_names(path)
+    if len(names) == 1:
+        return None
+    named = [name for name in names if name.strip().lower() == pool.lower()]
+    if named:
+        return named[0]
+    tables = []
+    for name in names:
+        try:
+            donor_column, _, two_column, one_column, _ = find_columns(read_xlsx_rows(path, name)[0])
+        except HLATableError:  # an empty sheet
+            continue
+        if donor_column and (two_column or one_column):
+            tables.append(name)
+    if len(tables) == 1:
+        return tables[0]
+    raise HLATableError(
+        f"{path} has {len(names)} sheets ({', '.join(names)}), "
+        f"{len(tables) or 'none'} of them with an HLA table, and none named {pool}: "
+        f"say which sheet to use, e.g. {Path(path).name}#{(tables or names)[0]} in hla_csv"
+    )
+
+
+def read_hla_table(spec):
+    """Read and validate an HLA table: a file, or one sheet of a workbook ("typing.xlsx#Pool1").
+    Raises HLATableError listing every problem."""
+    path, sheet = split_sheet(spec)
+    path = Path(path)
+    if not path.is_file():
+        raise HLATableError(f"{path}: file not found")
+
+    fieldnames, rows = read_table_rows(path, sheet)
+    if sheet is not None:
+        path = f"{path} (sheet {sheet})"
+    problems = []
+
+    donor_column, pool_column, two_column, one_column, ignored_columns = find_columns(fieldnames)
+    if donor_column is None:
+        raise HLATableError(
+            f"{path}: needs a 'donor' column (found columns: {', '.join(fieldnames)})"
+        )
 
     for gene, copies in two_column.items():
         if set(copies) != {"1", "2"}:

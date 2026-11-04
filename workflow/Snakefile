@@ -90,8 +90,9 @@ def donor_phase_threads(total_threads, parallel_jobs):
 
 
 def machine_cpus():
-    """CPUs of this SLURM job, or of the machine outside SLURM."""
-    for variable in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
+    """CPUs of this SLURM job, or of the machine outside SLURM. SLURM_CPUS_ON_NODE comes first:
+    with sbatch --exclusive it is the whole node, more than run.sh's --cpus-per-task."""
+    for variable in ("SLURM_CPUS_ON_NODE", "SLURM_CPUS_PER_TASK"):
         value = os.environ.get(variable, "")
         if value.isdigit():
             return int(value)
@@ -99,10 +100,13 @@ def machine_cpus():
 
 
 def machine_mem_gb():
-    """Memory of this SLURM job, or the memory available on the machine."""
+    """Memory of this SLURM job (--mem or --mem-per-cpu), or the memory available on the machine."""
     value = os.environ.get("SLURM_MEM_PER_NODE", "")
     if value.isdigit():
         return int(value) // 1024
+    value = os.environ.get("SLURM_MEM_PER_CPU", "")
+    if value.isdigit():
+        return int(value) * machine_cpus() // 1024
     with open("/proc/meminfo") as handle:
         for line in handle:
             if line.startswith("MemAvailable:"):
@@ -315,19 +319,20 @@ POOL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 TENX_FASTQ_NAME = re.compile(
     r"^(?P<id>.+?)_S\d+(?:_L\d{3})?_(?P<read>R[123]|I[12])_\d{3}\.fastq\.gz$"
 )
-# Any other name, e.g. Pool1_GEX_R1.fastq.gz. These FASTQs are linked under 10x
-# names in results/<pool>/fastqs/ before Cell Ranger; the originals are not touched.
+# Any other name, e.g. Pool1_GEX_R1.fastq.gz, or Pool1_GEX_1.fastq.gz as sequencing
+# facilities and SRA downloads name them (_1 = R1, _2 = R2). These FASTQs are linked under
+# 10x names in results/<pool>/fastqs/ before Cell Ranger; the originals are not touched.
 PLAIN_FASTQ_NAME = re.compile(
-    r"^(?P<id>.+?)[_.](?P<read>R[123]|I[12])\.(?:fastq|fq)\.gz$"
+    r"^(?P<id>.+?)[_.](?P<read>R[123]|I[12]|[1-4])\.(?:fastq|fq)\.gz$"
 )
 
 
-def find_fastqs(path, given, library, pool, where, problems):
-    """Find one library's FASTQs. Return (Cell Ranger fastqs folder, fastq_id, links).
+def find_fastq_files(path, given, library, where, problems):
+    """One library's FASTQs in one place. Return (folder, fastq_id, reads); reads is
+    {read: file} for simple names and {} for 10x names, ("", "", {}) after a problem.
 
     path is a folder, one FASTQ file of the library, or a folder plus the file name
-    start (/data/Pool1_GEX for /data/Pool1_GEX_R1.fastq.gz). links maps the 10x
-    names to create in results/<pool>/fastqs/<library>/ to the original files.
+    start (/data/Pool1_GEX for /data/Pool1_GEX_R1.fastq.gz).
     """
     column = f"{library}_fastqs"
     folder = path
@@ -344,7 +349,8 @@ def find_fastqs(path, given, library, pool, where, problems):
     tenx_ids = {m.group("id") for m in map(TENX_FASTQ_NAME.match, files) if m}
     plain = {}
     for match in filter(None, map(PLAIN_FASTQ_NAME.match, files)):
-        plain.setdefault(match.group("id"), {})[match.group("read")] = os.path.join(
+        read = match.group("read")
+        plain.setdefault(match.group("id"), {})[f"R{read}" if read in "12" else read] = os.path.join(
             folder, match.string
         )
     ids = sorted(tenx_ids | set(plain))
@@ -352,14 +358,14 @@ def find_fastqs(path, given, library, pool, where, problems):
     if given:
         if given not in ids:
             problems.append(
-                f"{where}: no FASTQ files named {given}_R1.fastq.gz or "
+                f"{where}: no FASTQ files named {given}_R1.fastq.gz, {given}_1.fastq.gz or "
                 f"{given}_S1_L001_R1_001.fastq.gz in {folder}"
             )
             return "", "", {}
         fastq_id = given
     elif not ids:
         problems.append(
-            f"{where}: no FASTQ files (like NAME_R1.fastq.gz or "
+            f"{where}: no FASTQ files (like NAME_R1.fastq.gz, NAME_1.fastq.gz or "
             f"NAME_S1_L001_R1_001.fastq.gz) in {folder}"
         )
         return "", "", {}
@@ -367,7 +373,8 @@ def find_fastqs(path, given, library, pool, where, problems):
         problems.append(
             f"{where}: {folder} holds FASTQs of several samples ({', '.join(ids)}); "
             f"add a {library}_fastq_id column saying which one to use, or put "
-            f"{folder}/<name> in {column}"
+            f"{folder}/<name> in {column} (several separated by ';' when they are lanes "
+            "of the same library)"
         )
         return "", "", {}
     else:
@@ -377,14 +384,63 @@ def find_fastqs(path, given, library, pool, where, problems):
         return folder, fastq_id, {}
 
     reads = plain[fastq_id]
+    if "3" in reads or "4" in reads:
+        problems.append(
+            f"{where}: {fastq_id}_1/_2/_3.fastq.gz: with more than two numbered files (SRA "
+            "downloads with index reads) the names do not say which is R1 and which R2. Link "
+            f"them as {fastq_id}_R1.fastq.gz and {fastq_id}_R2.fastq.gz (R1 is the short "
+            "barcode read, 26-28 bases) and use those"
+        )
+        return "", "", {}
     for read in ("R1", "R2"):
         if read not in reads:
             problems.append(f"{where}: {fastq_id}_{read}.fastq.gz is missing in {folder}")
             return "", "", {}
+    return folder, fastq_id, reads
+
+
+def tenx_lanes(folder, fastq_id):
+    """[{read: file}] for each lane of a sample with 10x names."""
+    lanes = {}
+    for name in sorted(os.listdir(folder)):
+        match = TENX_FASTQ_NAME.match(name)
+        if match and match.group("id") == fastq_id:
+            lane = name[len(fastq_id):match.start("read")]  # _S1_L001_
+            lanes.setdefault(lane, {})[match.group("read")] = os.path.join(folder, name)
+    return list(lanes.values())
+
+
+def find_fastqs(paths, given, library, pool, where, problems):
+    """Find one library's FASTQs. Return (Cell Ranger fastqs folder, fastq_id, links).
+
+    paths is one place as find_fastq_files takes it, or several separated by ';' for one
+    library sequenced on several lanes or runs under different names
+    (/data/HVYKYDMXY_1_SI-TT-F1;/data/HVYKYDMXY_2_SI-TT-F1). links maps the 10x names to
+    create in results/<pool>/fastqs/<library>/ to the original files: simple names, and
+    every name when there are several places, become lanes L001, L002, ... of one sample.
+    """
+    found = [
+        find_fastq_files(resolve_path(part.strip()), given, library, where, problems)
+        for part in paths.split(";") if part.strip()
+    ]
+    if not all(folder for folder, _, _ in found):
+        return "", "", {}
+    if len(found) == 1 and not found[0][2]:  # 10x names: Cell Ranger reads the folder as it is
+        return found[0][0], found[0][1], {}
+
+    lanes = []
+    for folder, fastq_id, reads in found:
+        lanes.extend([reads] if reads else tenx_lanes(folder, fastq_id))
+    sources = [source for lane in lanes for source in lane.values()]
+    if len(set(sources)) < len(sources):
+        problems.append(f"{where}: {library}_fastqs names the same files twice")
+        return "", "", {}
+    fastq_id = found[0][1]
     link_dir = os.path.join(RESULTS_ROOT, pool, "fastqs", library)
     links = {
-        os.path.join(link_dir, f"{fastq_id}_S1_L001_{read}_001.fastq.gz"): source
-        for read, source in reads.items()
+        os.path.join(link_dir, f"{fastq_id}_S1_L{number:03d}_{read}_001.fastq.gz"): source
+        for number, lane in enumerate(lanes, start=1)
+        for read, source in lane.items()
     }
     return link_dir, fastq_id, links
 
@@ -432,12 +488,14 @@ def load_samples(path):
         sample = {
             "pool": pool,
             "multi_csv": resolve_optional_path(row.get("multi_csv")),
-            "gex_fastqs": resolve_optional_path(row.get("gex_fastqs")) or "",
-            "tcr_fastqs": resolve_optional_path(row.get("tcr_fastqs")) or "",
+            "gex_fastqs": row.get("gex_fastqs") or "",  # resolved in find_fastqs
+            "tcr_fastqs": row.get("tcr_fastqs") or "",
             "gex_fastq_id": "",
             "tcr_fastq_id": "",
             "expect_cells": DEFAULT_EXPECT_CELLS,
+            # the table as the scripts read it (typing.xlsx#Pool1 for one sheet), and its file
             "hla_csv": resolve_optional_path(row.get("hla_csv")) or "",
+            "hla_file": "",
             "manual_assignments": resolve_optional_path(row.get("manual_assignments")) or "",
             "n_donors": None,
             "fastq_links": {},
@@ -478,7 +536,12 @@ def load_samples(path):
 
         n_hla_donors = None
         if sample["hla_csv"]:
+            sample["hla_file"], sheet = hla_table.split_sheet(sample["hla_csv"])
             try:
+                if sheet is None:  # a workbook with several sheets: one per pool, or one table
+                    sheet = hla_table.choose_sheet(sample["hla_file"], pool)
+                    if sheet is not None:
+                        sample["hla_csv"] = f"{sample['hla_file']}#{sheet}"
                 table = hla_table.read_hla_table(sample["hla_csv"])
             except hla_table.HLATableError as error:
                 problems.append(f"{where}: problem in the HLA table {error}")
@@ -585,18 +648,21 @@ MIN_CPUS, MIN_MEM_GB = 8, 64
 DISK_PER_POOL_GB = 100
 
 
-def check_machine(samples):
-    """Warnings (the run still starts) when this computer, or this SLURM job, is smaller than the run needs."""
-    where = "in this SLURM job" if os.environ.get("SLURM_JOB_ID") else "free on this computer"
+def check_machine(pools):
+    """Warnings (the run still starts) when this computer, or this SLURM job, is smaller than the run needs.
+    A dry run on a SLURM cluster leaves out CPUs and memory: it often runs on the login node or in a
+    small job, and the real run gets its own job."""
     warnings = []
-    cpus, mem_gb = machine_cpus(), machine_mem_gb()
-    if mem_gb < MIN_MEM_GB:
-        warnings.append(f"{mem_gb} GB of memory {where}: Cell Ranger needs at least {MIN_MEM_GB} GB for "
-                        "the human genome (10x recommends 128 GB) and may stop for lack of memory")
-    if cpus < MIN_CPUS:
-        warnings.append(f"{cpus} CPUs: Cell Ranger asks for at least {MIN_CPUS} (16 recommended); "
-                        "the run will work but take much longer")
-    to_run = [pool for pool in samples if not os.path.isfile(
+    if not (workflow.output_settings.dryrun and shutil.which("sbatch")):
+        where = "in this SLURM job" if os.environ.get("SLURM_JOB_ID") else "free on this computer"
+        cpus, mem_gb = machine_cpus(), machine_mem_gb()
+        if mem_gb < MIN_MEM_GB:
+            warnings.append(f"{mem_gb} GB of memory {where}: Cell Ranger needs at least {MIN_MEM_GB} GB for "
+                            "the human genome (10x recommends 128 GB) and may stop for lack of memory")
+        if cpus < MIN_CPUS:
+            warnings.append(f"{cpus} CPUs: Cell Ranger asks for at least {MIN_CPUS} (16 recommended); "
+                            "the run will work but take much longer")
+    to_run = [pool for pool in pools if not os.path.isfile(
         os.path.join(RESULTS_ROOT, pool, "demultiplexed", "cell_to_donor.csv"))]
     folder = RESULTS_ROOT
     while not os.path.isdir(folder):
@@ -609,9 +675,21 @@ def check_machine(samples):
     return warnings
 
 
+def selected_pools(samples):
+    """The pools to run: --config pools=Pool1,Pool2 (run.sh --pools), else every pool of the sheet.
+    Jobs with different pools from the same sheet can run at the same time: Snakemake only stops a
+    run that would write the files of another. The all-pools tables are left for a run with every pool."""
+    chosen = [pool for pool in comma_separated(cfg_or_default("pools", "")).split(",") if pool]
+    unknown = [pool for pool in chosen if pool not in samples]
+    problems = [f"--pools: {', '.join(unknown)} not in {SAMPLES_CSV} (its pools: {', '.join(samples)})"
+                ] if unknown else []
+    return chosen or list(samples), problems
+
+
 SAMPLES, _problems, _warnings = load_samples(SAMPLES_CSV)
-_problems += check_tools(SAMPLES)
-_warnings += check_machine(SAMPLES)
+RUN_POOLS, _pool_problems = selected_pools(SAMPLES)
+_problems += _pool_problems + check_tools(SAMPLES)
+_warnings += check_machine(RUN_POOLS)
 
 for _warning in _warnings:
     print(f"[warning] {_warning}", file=sys.stderr)
@@ -622,6 +700,7 @@ if _problems:
     )
 
 POOLS = list(SAMPLES)
+ALL_POOLS_RUN = set(RUN_POOLS) == set(POOLS)
 
 
 # --------------------------------------------------------------------------
@@ -645,7 +724,7 @@ def record_run_info():
     os.makedirs(run_dir, exist_ok=True)
     inputs = [SAMPLES_CSV, *workflow.configfiles]
     for sample in SAMPLES.values():
-        inputs += [sample["hla_csv"], sample["manual_assignments"], sample["multi_csv"]]
+        inputs += [sample["hla_file"], sample["manual_assignments"], sample["multi_csv"]]
     for path in dict.fromkeys(path for path in inputs if path and os.path.isfile(path)):
         name = os.path.basename(path)
         target = os.path.join(run_dir, name)
@@ -683,13 +762,16 @@ onstart:
 
 onsuccess:
     # HLA naming needs 5' data: say so at the end of the run, not only in the report
-    for _pool in POOLS:
+    for _pool in RUN_POOLS:
         _library = chemistry.gene_expression_chemistry(os.path.join(RESULTS_ROOT, _pool, "cellranger", "outs"))
         if chemistry.is_five_prime(_library) is False:
             print(f"[scHLA-demux] WARNING pool {_pool}: Cell Ranger chemistry is {_library}. "
                   f"{chemistry.THREE_PRIME_NOTE}", file=sys.stderr)
+    if not ALL_POOLS_RUN:
+        print(f"[scHLA-demux] Ran pools {', '.join(RUN_POOLS)} only. When every pool is done, run again "
+              "without --pools to make the all-pools tables and the QC report.", file=sys.stderr)
 
-for _sample in SAMPLES.values():
+for _sample in (SAMPLES[_pool] for _pool in RUN_POOLS):
     print(
         f"[scHLA-demux] pool {_sample['pool']}: "
         f"{'GEX + TCR' if _sample['has_tcr'] else 'GEX only'}, "
@@ -902,14 +984,12 @@ def make_multi_csv_args(wildcards):
 
 rule all:
     input:
-        expand(GENOTYPE_SUMMARY_CSV, pool=POOLS),
-        expand(READ_FIT_CSV, pool=POOLS) if MATCHING_BY_READS else [],
-        expand(ASSIGNMENT_CSV, pool=POOLS),
-        expand(MATCH_SCORE_CSV, pool=POOLS),
-        expand(DEMULTIPLEX_MANIFEST, pool=POOLS),
-        ALL_POOLS_DONORS,
-        ALL_POOLS_CELLS,
-        QC_REPORT
+        expand(GENOTYPE_SUMMARY_CSV, pool=RUN_POOLS),
+        expand(READ_FIT_CSV, pool=RUN_POOLS) if MATCHING_BY_READS else [],
+        expand(ASSIGNMENT_CSV, pool=RUN_POOLS),
+        expand(MATCH_SCORE_CSV, pool=RUN_POOLS),
+        expand(DEMULTIPLEX_MANIFEST, pool=RUN_POOLS),
+        [ALL_POOLS_DONORS, ALL_POOLS_CELLS, QC_REPORT] if ALL_POOLS_RUN else []
 
 
 def make_multi_csv_inputs(wildcards):
@@ -1253,7 +1333,7 @@ rule summarize_genotypes:
 rule hla_read_evidence:
     input:
         alignments=genotype_alignment_inputs,
-        reference=lambda wildcards: [SAMPLES[wildcards.pool]["hla_csv"]] if SAMPLES[wildcards.pool]["hla_csv"] else []
+        reference=lambda wildcards: [SAMPLES[wildcards.pool]["hla_file"]] if SAMPLES[wildcards.pool]["hla_file"] else []
     output:
         summary=READS_HLA_SUMMARY_CSV,
         evidence=READ_EVIDENCE_CSV,
@@ -1306,7 +1386,7 @@ rule build_donor_assignments:
     input:
         summary=CLUSTER_HLA_CSV,
         read_fit=[READ_FIT_CSV] if MATCHING_BY_READS else [],
-        reference=lambda wildcards: [SAMPLES[wildcards.pool]["hla_csv"]] if SAMPLES[wildcards.pool]["hla_csv"] else [],
+        reference=lambda wildcards: [SAMPLES[wildcards.pool]["hla_file"]] if SAMPLES[wildcards.pool]["hla_file"] else [],
         manual=lambda wildcards: [SAMPLES[wildcards.pool]["manual_assignments"]] if SAMPLES[wildcards.pool]["manual_assignments"] else []
     output:
         assignment=ASSIGNMENT_CSV,

@@ -125,7 +125,7 @@ See [The donor HLA table](#the-donor-hla-table). `config/hla_example.csv` is a t
 # on your computer: run everything (uses all its CPUs; add --cores 8 to use fewer)
 ./run.sh
 
-# on a SLURM cluster: run everything as one job on a whole node
+# on a SLURM cluster: run everything as one job (16 CPUs, 64 GB; see Configuration to change it)
 sbatch run.sh
 ```
 
@@ -142,10 +142,10 @@ Results are written to `results/<pool>/`. Open `results/qc_report.html` first (s
 | Column | Required | What to put |
 |---|---|---|
 | `pool` | yes | A short name for the pool, used for the results folder. Letters, digits, `_`, `-`, `.` |
-| `gex_fastqs` | yes | The gene-expression FASTQs: their folder, or the folder plus the file name start when the folder holds several libraries (`/data/Pool1_GEX` for `/data/Pool1_GEX_R1.fastq.gz`). See [FASTQ names](#fastq-names) |
+| `gex_fastqs` | yes | The gene-expression FASTQs: their folder, or the folder plus the file name start when the folder holds several libraries (`/data/Pool1_GEX` for `/data/Pool1_GEX_R1.fastq.gz`). Several, separated by `;`, for one library under several names (lanes or runs). See [FASTQ names](#fastq-names) |
 | `tcr_fastqs` | no | The TCR (V(D)J-T) FASTQs, in the same way. Leave empty for a GEX-only pool |
 | `n_donors` | yes* | Number of patients mixed in the pool. *Can be left empty when `hla_csv` is given: the number of rows in the HLA table is used |
-| `hla_csv` | no | The HLA table (`.csv`, `.tsv` or `.xlsx`) of the patients in this pool, or a table shared by several pools. Leave empty to skip matching |
+| `hla_csv` | no | The HLA table (`.csv`, `.tsv` or `.xlsx`) of the patients in this pool, or a table shared by several pools. One sheet of a workbook: `typing.xlsx#Sheet2` (see [File types](#the-donor-hla-table)). Leave empty to skip matching |
 | `gex_fastq_id`, `tcr_fastq_id` | no | Another way to choose the library in a folder with several: the file name part before `_S1_...` or `_R1` |
 | `expect_cells` | no | Expected number of cells for Cell Ranger (default: let Cell Ranger estimate) |
 | `manual_assignments` | no | A CSV naming clusters by hand (`cluster,donor`, e.g. `donor3,Patient_07`), for when HLA matching cannot decide. See [match_status](#match_status-how-sure-is-the-patient-label) |
@@ -155,16 +155,25 @@ Notes:
 
 - The pipeline writes the Cell Ranger multi CSV for you (`results/<pool>/cellranger_multi.csv`) and finds the FASTQ sample name from the file names.
 - `n_donors` is the number souporcell looks for. Put the real number of patients in the pool, even if some are missing from your HLA table.
-- Several pools in one sheet run in the same run, one after the other or side by side, as the cores allow.
+- Several pools in one sheet run in the same run, one after the other or side by side, as the cores allow. To share them between several SLURM jobs, see [Several jobs at once](#running-re-running-and-resuming).
 
 ### FASTQ names
 
 Both naming styles work:
 
 - 10x / bcl2fastq names: `NAME_S1_L001_R1_001.fastq.gz`, `NAME_S1_L001_R2_001.fastq.gz` (several lanes are fine).
-- Simple names, as many sequencing providers deliver them: `NAME_R1.fastq.gz`, `NAME_R2.fastq.gz` (also `NAME.R1.fq.gz`). The pipeline links them under 10x names in `results/<pool>/fastqs/` before Cell Ranger. The original files are not renamed, moved or copied.
+- Simple names, as many sequencing providers deliver them: `NAME_R1.fastq.gz`, `NAME_R2.fastq.gz` (also `NAME.R1.fq.gz`), or `NAME_1.fastq.gz`, `NAME_2.fastq.gz` (`_1` is R1, `_2` is R2, as from many facilities and SRA). The pipeline links them under 10x names in `results/<pool>/fastqs/` before Cell Ranger. The original files are not renamed, moved or copied.
 
-R1 and R2 are required; index reads (I1, I2) are optional.
+R1 and R2 are required; index reads (I1, I2) are optional. Numbered names with a `_3` (SRA downloads that include index reads) are refused, because the numbers then do not say which file is R1.
+
+**One library under several names**, e.g. sequenced on two lanes that the facility delivers as `HVYKYDMXY_1_SI-TT-F1_1.fastq.gz` and `HVYKYDMXY_2_SI-TT-F1_1.fastq.gz` (plus their `_2` files): list each name start, separated by `;`:
+
+```csv
+pool,gex_fastqs,tcr_fastqs,n_donors,hla_csv
+Sorting1,/data/HVYKYDMXY_1_SI-TT-F1;/data/HVYKYDMXY_2_SI-TT-F1,,4,config/hla.xlsx
+```
+
+They are linked as lanes `L001`, `L002`, ... of one sample, and Cell Ranger reads them all. The same works for several folders of 10x-named files.
 
 ## The donor HLA table
 
@@ -178,18 +187,18 @@ Patient_03,A*11:01,A*11:01,B*15:01,B*40:01,,
 
 Rules:
 
-- **`donor` column**: the patient name. This becomes the folder name and the label of the cells. `patient` also works as the column name.
-- **Gene columns**: `<gene>_1` and `<gene>_2` (or `<gene>1` and `<gene>2`), e.g. `A_1, A_2, B_1, B_2, C_1, C_2`. Matching uses A, B and C by default. You can add other genes such as `DRB1_1, DRB1_2`, and use them by adding them to `matching.genes` in `config/config.yaml`.
+- **`donor` column**: the patient name. This becomes the folder name and the label of the cells. `patient`, `patient ID`, `participant`, `subject` and `sample` also work as the column name.
+- **Gene columns**: `<gene>_1` and `<gene>_2` (or `<gene>1` and `<gene>2`), e.g. `A_1, A_2, B_1, B_2, C_1, C_2`, also with `HLA-` or `HLA_` before (`HLA_A1`, `HLA-A_1`). Matching uses A, B and C by default. You can add other genes such as `DRB1_1, DRB1_2`, and use them by adding them to `matching.genes` in `config/config.yaml`.
 - **Homozygous**: write the same allele in both columns (`A*11:01, A*11:01`).
 - **Unknown**: leave the cell empty (or write `NA`). That allele is just not compared.
 - **Patients without HLA typing**: keep them in the table with empty HLA cells. If all the other patients of the pool are found, the cluster left over is named after them (`matched_by_elimination`).
-- **Allele spelling**: `A*02:01`, `A*02:01:01`, `HLA-A*02:01` and `02:01` are all accepted.
+- **Allele spelling**: `A*02:01`, `A*02:01:01`, `HLA-A*02:01`, `02:01` and `02 : 01` are all accepted.
 - **P and G groups** (`B*39:01P`, `A*02:01:01G`, as many HLA labs report): the HLA reference has no group names, so the P or G is dropped and the group is used as the allele that names it (`B*39:01`, `A*02:01:01`). The pipeline lists these conversions at the start of the run.
 - **Low-resolution typing works**: `A*03`, `A3`, or just `3` in an A column (also `Cw7` for C). Each allele is used at the resolution it has: `A*03` in the table allows any `A*03` allele, `A*03:01` only `A*03:01` alleles (the table is used at two fields at most). A gene with only one allele typed leaves the other one free.
 - **`pool` column** (optional): which pool each patient is in. With it, one table can hold the patients of every pool: each pool is only matched against its own patients, and `n_donors` can be left empty.
 - **Other columns** (age, diagnosis, notes...) are allowed and ignored, so a patient sheet with clinical data works as is. The pipeline only warns about a column that looks like a mistyped HLA column, such as `A3`.
 
-Tip for Excel users: always write the gene prefix (`A*02:01`, not `02:01`). Otherwise Excel may turn the value into a time.
+Excel turns `02:01` typed in a cell into the time 2:01. The pipeline reads such cells back as `02:01`, but writing the gene prefix (`A*02:01`) or spaces (`02 : 01`) keeps Excel from doing it.
 
 The pipeline writes the HLA types it finds in the same layout (`results/<pool>/reports/cluster_hla_from_reads.csv`, at one field). You can open both tables side by side, or copy the output, rename the `donor` values and reuse it as an input.
 
@@ -203,7 +212,7 @@ The pipeline writes the HLA types it finds in the same layout (`results/<pool>/r
   ```
 
 - `A_alleles` columns with alleles separated by `|`, the old layout.
-- **File types**: `.csv`, `.tsv`, or an Excel `.xlsx` file. For Excel, the first sheet is read.
+- **File types**: `.csv`, `.tsv`, or an Excel `.xlsx` file. In a workbook with several sheets, the pipeline uses the sheet named like the pool (e.g. sheets `Sorting1` ... `Sorting10` for pools of those names), else the only sheet holding an HLA table (a donor column and gene columns). Otherwise it stops and asks: name the sheet after a `#` in `hla_csv`, e.g. `config/typing.xlsx#Sorting1`. The sheet used is shown at the start of the run.
 
 **One table for several pools**: add a `pool` column (see above), or point every pool to the same table without it. Without a `pool` column, each pool's clusters are matched against all patients in the table, and the patients that belong to other pools are simply not used. In that case fill in `n_donors`, because otherwise it would be taken from the table's row count.
 
@@ -321,6 +330,7 @@ In this section, "run again" means `./run.sh` on a computer or `sbatch run.sh` o
 - **Changing `n_donors`**: delete `results/<pool>/souporcell` and everything after it (`arcasHLA`, `reports`, `demultiplexed`), then run again.
 - **Re-running Cell Ranger**: an existing Cell Ranger output in `results/<pool>/cellranger` is always reused. Delete that folder to run it again (e.g. after changing the FASTQs).
 - **Other config file**: `./run.sh --configfile config/other.yaml` (or `sbatch run.sh --configfile ...`). Any extra arguments are passed to Snakemake.
+- **Several jobs at once** (e.g. one SLURM job per node): give each job its own pools from the same sample sheet, from the same folder: `sbatch run.sh --pools Pool1,Pool2` and `sbatch run.sh --pools Pool3,Pool4`. When all are done, run once more without `--pools` to make the all-pools tables and the QC report (minutes). Runs with different `results_dir` settings can also go on side by side. Two runs only block each other when they would write the same files.
 
 ### Running one stage at a time
 
@@ -362,13 +372,22 @@ Tool paths and settings live in `config/config.yaml`. The tool paths point to wh
 | `matching.two_field_resolution` | Use the table at two-field resolution at most (default `true`) |
 | `matching.min_read_fit`, `min_margin` | Lowest read fit for naming a cluster (default `0.90`), and the margin below which a naming is `ambiguous` (default `0.03`) |
 
-On a computer, `./run.sh` uses all its CPUs (`--cores 8` for fewer) and lets Cell Ranger use 90% of the free memory (`cellranger.localmem_gb` to set it). Under SLURM, `run.sh` asks for a whole node (all CPUs and memory) for up to 7 days. To change that, add `sbatch` options, which override the ones in the script: `sbatch --partition=highmem --time=2-00:00:00 run.sh`. The Snakemake used is set there too, or with `SNAKEMAKE=/path/to/snakemake ./run.sh`.
+On a computer, `./run.sh` uses all its CPUs (`--cores 8` for fewer) and lets Cell Ranger use 90% of the free memory (`cellranger.localmem_gb` to set it). Under SLURM, `sbatch run.sh` asks for 16 CPUs and 64 GB (Cell Ranger's minimum; a 60k-cell pool fitted) for up to 7 days, so it can share a node. `sbatch` options override these:
+
+```bash
+sbatch --cpus-per-task=32 --mem=128G run.sh        # a bigger job
+sbatch --exclusive --mem=0 run.sh                  # a whole node: all its CPUs and memory
+sbatch --partition=long --time=2-00:00:00 run.sh   # another partition or time limit
+```
+
+If your cluster's time limit is shorter than 7 days, give `--time` (otherwise the job may wait forever). The Snakemake used is set in `run.sh` too, or with `SNAKEMAKE=/path/to/snakemake ./run.sh`.
 
 ## Troubleshooting
 
 - **"Please fix these problems before running scHLA-demux"**: the list under it says which line of which file is wrong.
-- **"holds FASTQs of several samples"**: put the folder plus the file name start in `gex_fastqs` (e.g. `/data/Pool1_GEX` for `/data/Pool1_GEX_R1.fastq.gz`), or add a `gex_fastq_id` (or `tcr_fastq_id`) column with that name.
-- **A run was killed** (out of memory, reboot, time limit): run again. Cell Ranger's leftover lock is removed automatically and it resumes where it stopped.
+- **"holds FASTQs of several samples"**: put the folder plus the file name start in `gex_fastqs` (e.g. `/data/Pool1_GEX` for `/data/Pool1_GEX_R1.fastq.gz`), or add a `gex_fastq_id` (or `tcr_fastq_id`) column with that name. If they are lanes of one library, list them all, separated by `;`.
+- **A run was killed** (`scancel`, out of memory, reboot, time limit): run again. Snakemake's and Cell Ranger's leftover locks are removed automatically when no other run from the folder is going on, and Cell Ranger resumes where it stopped.
+- **"Directory cannot be locked"**: another run from this folder would write the same files. If you are sure no other run is going on (e.g. it ran on a computer that was switched off), remove the lock with `./run.sh --unlock` and run again.
 - **Most clusters are `unmatched`**: first check the chemistry line of the QC report: with 3' data this is expected (name the clusters with `manual_assignments` if you know them from other data). Otherwise check that the HLA table belongs to this pool. Then compare `cluster_hla_from_reads.csv` with your table, and look at `read_fit_by_gene` in `donor_match_scores.csv` to see which gene disagrees: a typing error in the table shows up as one gene with a low fit. Low-coverage clusters (few HLA reads, e.g. 3' data) give less certain calls.
 - **`ambiguous`**: the tied patients share alleles at the compared genes. Adding more genes (e.g. `DRB1`) to the table and to `matching.genes` can separate them.
 

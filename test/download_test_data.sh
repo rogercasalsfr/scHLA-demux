@@ -31,7 +31,9 @@ for entry in "${FILES[@]}"; do
     continue
   fi
   echo "${name}: downloading"
-  curl -fL --retry 3 -C - -o "${target}.part" "${url}"
+  progress=(--silent --show-error)  # a progress bar only in a terminal, not in a log
+  [ -t 2 ] && progress=(--progress-bar)
+  curl -fL --retry 3 -C - "${progress[@]}" -o "${target}.part" "${url}"
   echo "${name}: checking MD5"
   if [ "$(md5sum < "${target}.part" | cut -d' ' -f1)" != "${md5}" ]; then
     echo "${name}: MD5 does not match ENA's; delete ${target}.part and run this script again" >&2
