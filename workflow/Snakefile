@@ -182,15 +182,19 @@ CELLRANGER_MEM_GB = (
 
 
 def find_apptainer(command):
-    """The container command: as set in config.yaml, else singularity, else the copy setup.sh
-    installs into resources/ on a computer without apptainer."""
+    """The container command: a path set in config.yaml, else the copy setup.sh installs into
+    resources/ (only there if the computer had no apptainer), else apptainer or singularity.
+    The installed copy comes first even if a system apptainer appears later: another command
+    counts as a changed parameter and Snakemake would run souporcell and every later step again."""
     if os.path.sep in command:
         return resolve_path(command)
+    installed = os.path.join(REPO_ROOT, "resources", "envs", "apptainer", "bin", "apptainer")
+    if os.path.isfile(installed):
+        return installed
     for name in (command, "singularity"):
         if shutil.which(name):
             return name
-    installed = os.path.join(REPO_ROOT, "resources", "envs", "apptainer", "bin", "apptainer")
-    return installed if os.path.isfile(installed) else command
+    return command
 
 
 APPTAINER = find_apptainer(str(cfg_or_default("souporcell.apptainer", "apptainer")))

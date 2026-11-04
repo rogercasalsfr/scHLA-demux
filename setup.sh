@@ -203,10 +203,11 @@ install_vdj() { install_reference "${VDJ_REF}" "${VDJ_URL}" vdj_ok refdata-vdj; 
 
 # apptainer (or singularity) runs the souporcell image. Clusters usually have it; on a computer
 # without it, conda-forge's apptainer goes into resources/envs/apptainer (no admin rights needed).
-find_apptainer() {
-  APPTAINER=$(command -v apptainer || command -v singularity || true)
-  if [ -z "${APPTAINER}" ] && [ -x "${RES}/envs/apptainer/bin/apptainer" ]; then
+find_apptainer() {  # same order as the workflow: an installed copy first, then the system's
+  if [ -x "${RES}/envs/apptainer/bin/apptainer" ]; then
     APPTAINER="${RES}/envs/apptainer/bin/apptainer"
+  else
+    APPTAINER=$(command -v apptainer || command -v singularity || true)
   fi
 }
 find_apptainer
