@@ -18,7 +18,14 @@
 
 set -euo pipefail
 
-REPO_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# sbatch runs a copy of this script from SLURM's spool folder: then the repo is the folder it was submitted
+# from. Run directly (also inside another SLURM job, e.g. srun or salloc), the repo is the script's folder.
+if [ -f "${SCRIPT_DIR}/workflow/Snakefile" ]; then
+  REPO_DIR="${SCRIPT_DIR}"
+else
+  REPO_DIR="${SLURM_SUBMIT_DIR:-${SCRIPT_DIR}}"
+fi
 # Snakemake installed by setup.sh. Override with: SNAKEMAKE=/path/to/snakemake sbatch run_slurm.sh
 SNAKEMAKE="${SNAKEMAKE:-${REPO_DIR}/resources/envs/snakemake/bin/snakemake}"
 CORES="${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-$(nproc)}}"
